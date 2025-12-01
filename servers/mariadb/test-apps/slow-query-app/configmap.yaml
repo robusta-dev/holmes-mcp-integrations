@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slow-query-app-config
+  namespace: mariadb
+data:
+  app.py: |
+{{ readFile "/Users/arikalon/pycharm/holmesgpt/mariadb/test-apps/slow-query-app/app.py" | indent 4 }}

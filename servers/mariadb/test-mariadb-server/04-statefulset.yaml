@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+  namespace: mariadb
+spec:
+  serviceName: mariadb-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      initContainers:
+      - name: init-mariadb
+        image: mariadb:11
+        command:
+        - bash
+        - -c
+        - |
+          # Copy init scripts to a writable location
+          cp /docker-entrypoint-initdb.d-ro/*.sql /docker-entrypoint-initdb.d/ || true
+
+          # Replace password placeholders with actual passwords
+          if [ -f /docker-entrypoint-initdb.d/03-create-users.sql ]; then
+            sed -i "s/\${APP_PASSWORD}/$APP_PASSWORD/g" /docker-entrypoint-initdb.d/03-create-users.sql
+            sed -i "s/\${MCP_PASSWORD}/$MCP_PASSWORD/g" /docker-entrypoint-initdb.d/03-create-users.sql
+          fi
+        env:
+        - name: APP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-app-secret
+              key: password
+        - name: MCP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-mcp-secret
+              key: password
+        volumeMounts:
+        - name: init-scripts-ro
+          mountPath: /docker-entrypoint-initdb.d-ro
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+      containers:
+      - name: mariadb
+        image: mariadb:11
+        ports:
+        - containerPort: 3306
+          name: mysql
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-root-secret
+              key: password
+        - name: MYSQL_DATABASE
+          value: testdb
+        - name: TZ
+          value: UTC
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        volumeMounts:
+        - name: mariadb-storage
+          mountPath: /var/lib/mysql
+        - name: mariadb-config
+          mountPath: /etc/mysql/conf.d
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+        - name: log-volume
+          mountPath: /var/log/mysql
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - |
+              mariadb-admin ping -h localhost -u root -p$MYSQL_ROOT_PASSWORD
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - |
+              mariadb -h localhost -u root -p$MYSQL_ROOT_PASSWORD -e "SELECT 1" >/dev/null 2>&1
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: mariadb-config
+        configMap:
+          name: mariadb-config
+      - name: init-scripts-ro
+        configMap:
+          name: mariadb-init-scripts
+      - name: init-scripts
+        emptyDir: {}
+      - name: log-volume
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: mariadb-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi

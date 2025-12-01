@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb-service
+  namespace: mariadb
+  labels:
+    app: mariadb
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3306
+    targetPort: 3306
+    protocol: TCP
+    name: mysql
+  selector:
+    app: mariadb
+---
+# Headless service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb-headless
+  namespace: mariadb
+  labels:
+    app: mariadb
+spec:
+  clusterIP: None
+  ports:
+  - port: 3306
+    targetPort: 3306
+    protocol: TCP
+    name: mysql
+  selector:
+    app: mariadb

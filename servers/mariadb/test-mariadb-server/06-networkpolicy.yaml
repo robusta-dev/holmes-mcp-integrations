@@ -1,0 +1,36 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mariadb-network-policy
+  namespace: mariadb
+spec:
+  podSelector:
+    matchLabels:
+      app: mariadb
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow connections from MCP server
+  - from:
+    - podSelector:
+        matchLabels:
+          app: mariadb-mcp-server
+    ports:
+    - protocol: TCP
+      port: 3306
+  # Allow connections from test applications
+  - from:
+    - podSelector:
+        matchLabels:
+          role: test-app
+    ports:
+    - protocol: TCP
+      port: 3306
+  # Allow connections from within the same namespace for debugging
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: mariadb
+    ports:
+    - protocol: TCP
+      port: 3306

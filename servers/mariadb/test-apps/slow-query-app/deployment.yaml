@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slow-query-app
+  namespace: mariadb
+  labels:
+    app: slow-query-app
+    role: test-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slow-query-app
+  template:
+    metadata:
+      labels:
+        app: slow-query-app
+        role: test-app
+    spec:
+      containers:
+      - name: slow-query-generator
+        image: python:3.11-slim
+        command:
+        - sh
+        - -c
+        - |
+          pip install mysql-connector-python
+          python /app/app.py
+        env:
+        - name: DB_HOST
+          value: "mariadb-service.mariadb.svc.cluster.local"
+        - name: DB_PORT
+          value: "3306"
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-app-secret
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-app-secret
+              key: password
+        - name: DB_NAME
+          value: "testdb"
+        - name: QUERY_INTERVAL
+          value: "15"  # Run slow queries every 15 seconds
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+      initContainers:
+      - name: wait-for-db
+        image: busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for MariaDB to be ready..."
+          until nc -z mariadb-service.mariadb.svc.cluster.local 3306; do
+            echo "MariaDB not ready yet. Waiting..."
+            sleep 5
+          done
+          echo "MariaDB is ready!"
+          sleep 10  # Extra wait to ensure DB is fully initialized
+      volumes:
+      - name: app-code
+        configMap:
+          name: slow-query-app-config
+          defaultMode: 0755

@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mariadb-mcp-minimal
+  namespace: mariadb
+  labels:
+    app: mariadb-mcp-minimal
+    version: minimal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb-mcp-minimal
+  template:
+    metadata:
+      labels:
+        app: mariadb-mcp-minimal
+        version: minimal
+    spec:
+      containers:
+      - name: mcp-server
+        image: me-west1-docker.pkg.dev/robusta-development/development/mariadb-http-mcp-minimal:1.0.3
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        # Database connection
+        - name: DB_HOST
+          value: "mariadb-service.mariadb.svc.cluster.local"
+        - name: DB_PORT
+          value: "3306"
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-mcp-secret
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-mcp-secret
+              key: password
+        - name: DB_NAME
+          value: "testdb"
+        - name: DB_CHARSET
+          value: "utf8mb4"
+
+        - name: MCP_READ_ONLY
+          value: "true"
+        - name: MCP_MAX_ROWS
+          value: "1000"
+        - name: MCP_MAX_POOL_SIZE
+          value: "5"
+
+        - name: LOG_LEVEL
+          value: "INFO"
+
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+
+        livenessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3

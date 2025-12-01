@@ -1,0 +1,183 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-init-scripts
+  namespace: mariadb
+data:
+  01-create-database.sql: |
+    -- Create test database
+    CREATE DATABASE IF NOT EXISTS testdb;
+    USE testdb;
+
+    -- Create sample tables for testing
+    CREATE TABLE IF NOT EXISTS customers (
+      customer_id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      email VARCHAR(100) UNIQUE NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_email (email),
+      INDEX idx_created (created_at)
+    );
+
+    CREATE TABLE IF NOT EXISTS products (
+      product_id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      price DECIMAL(10, 2) NOT NULL,
+      stock_quantity INT NOT NULL DEFAULT 0,
+      category VARCHAR(50),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_category (category),
+      INDEX idx_stock (stock_quantity)
+    );
+
+    CREATE TABLE IF NOT EXISTS orders (
+      order_id INT AUTO_INCREMENT PRIMARY KEY,
+      customer_id INT NOT NULL,
+      order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      total_amount DECIMAL(10, 2) NOT NULL,
+      status ENUM('pending', 'processing', 'completed', 'cancelled') DEFAULT 'pending',
+      FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
+      INDEX idx_customer (customer_id),
+      INDEX idx_status (status),
+      INDEX idx_date (order_date)
+    );
+
+    CREATE TABLE IF NOT EXISTS order_items (
+      item_id INT AUTO_INCREMENT PRIMARY KEY,
+      order_id INT NOT NULL,
+      product_id INT NOT NULL,
+      quantity INT NOT NULL,
+      price DECIMAL(10, 2) NOT NULL,
+      FOREIGN KEY (order_id) REFERENCES orders(order_id),
+      FOREIGN KEY (product_id) REFERENCES products(product_id),
+      INDEX idx_order (order_id),
+      INDEX idx_product (product_id)
+    );
+
+    -- Table for deadlock testing
+    CREATE TABLE IF NOT EXISTS inventory (
+      inventory_id INT AUTO_INCREMENT PRIMARY KEY,
+      product_id INT NOT NULL,
+      warehouse_id INT NOT NULL,
+      quantity INT NOT NULL DEFAULT 0,
+      last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_product_warehouse (product_id, warehouse_id),
+      INDEX idx_warehouse (warehouse_id)
+    );
+
+    -- Table without indexes for slow query testing
+    CREATE TABLE IF NOT EXISTS audit_log (
+      log_id INT AUTO_INCREMENT PRIMARY KEY,
+      action VARCHAR(100),
+      user_id INT,
+      details TEXT,
+      ip_address VARCHAR(45),
+      user_agent TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      -- Intentionally no indexes except primary key for slow query testing
+    );
+
+  02-insert-sample-data.sql: |
+    USE testdb;
+
+    -- Insert sample customers
+    INSERT INTO customers (name, email) VALUES
+    ('John Doe', 'john@example.com'),
+    ('Jane Smith', 'jane@example.com'),
+    ('Bob Johnson', 'bob@example.com'),
+    ('Alice Brown', 'alice@example.com'),
+    ('Charlie Wilson', 'charlie@example.com');
+
+    -- Insert sample products
+    INSERT INTO products (name, price, stock_quantity, category) VALUES
+    ('Laptop', 999.99, 50, 'Electronics'),
+    ('Mouse', 29.99, 200, 'Electronics'),
+    ('Keyboard', 79.99, 150, 'Electronics'),
+    ('Monitor', 299.99, 75, 'Electronics'),
+    ('Desk Chair', 199.99, 30, 'Furniture'),
+    ('Standing Desk', 599.99, 20, 'Furniture'),
+    ('Notebook', 4.99, 500, 'Stationery'),
+    ('Pen Set', 19.99, 300, 'Stationery'),
+    ('Coffee Mug', 12.99, 100, 'Kitchen'),
+    ('Water Bottle', 24.99, 80, 'Kitchen');
+
+    -- Insert sample orders
+    INSERT INTO orders (customer_id, total_amount, status) VALUES
+    (1, 1029.98, 'completed'),
+    (2, 329.98, 'processing'),
+    (3, 204.98, 'pending'),
+    (4, 799.98, 'completed'),
+    (5, 37.98, 'cancelled');
+
+    -- Insert sample order items
+    INSERT INTO order_items (order_id, product_id, quantity, price) VALUES
+    (1, 1, 1, 999.99),
+    (1, 2, 1, 29.99),
+    (2, 4, 1, 299.99),
+    (2, 2, 1, 29.99),
+    (3, 5, 1, 199.99),
+    (3, 7, 1, 4.99),
+    (4, 6, 1, 599.99),
+    (4, 5, 1, 199.99),
+    (5, 9, 2, 25.98),
+    (5, 7, 2, 9.98);
+
+    -- Insert inventory data for deadlock testing
+    INSERT INTO inventory (product_id, warehouse_id, quantity) VALUES
+    (1, 1, 25),
+    (1, 2, 25),
+    (2, 1, 100),
+    (2, 2, 100),
+    (3, 1, 75),
+    (3, 2, 75),
+    (4, 1, 40),
+    (4, 2, 35),
+    (5, 1, 15),
+    (5, 2, 15);
+
+    -- Insert sample audit log data (for slow query testing)
+    INSERT INTO audit_log (action, user_id, details, ip_address, user_agent)
+    SELECT
+      CONCAT('Action_', FLOOR(RAND() * 100)),
+      FLOOR(RAND() * 5) + 1,
+      CONCAT('Details for action ', FLOOR(RAND() * 1000)),
+      CONCAT(FLOOR(RAND() * 256), '.', FLOOR(RAND() * 256), '.', FLOOR(RAND() * 256), '.', FLOOR(RAND() * 256)),
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    FROM
+      (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5) t1,
+      (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5) t2,
+      (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5) t3,
+      (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5) t4;
+
+  03-create-users.sql: |
+    -- This script will be executed with environment variables for passwords
+
+    -- Create application user with read/write access
+    CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY '${APP_PASSWORD}';
+    GRANT ALL PRIVILEGES ON testdb.* TO 'app_user'@'%';
+
+    -- Create MCP read-only user for Holmes
+    CREATE USER IF NOT EXISTS 'mcp_readonly'@'%' IDENTIFIED BY '${MCP_PASSWORD}';
+
+    -- Grant read-only privileges for MCP user
+    GRANT SELECT ON *.* TO 'mcp_readonly'@'%';
+    GRANT PROCESS ON *.* TO 'mcp_readonly'@'%';
+    GRANT SHOW VIEW ON *.* TO 'mcp_readonly'@'%';
+    GRANT REPLICATION CLIENT ON *.* TO 'mcp_readonly'@'%';
+    GRANT SHOW DATABASES ON *.* TO 'mcp_readonly'@'%';
+
+    -- Grant access to performance and information schemas
+    GRANT SELECT ON performance_schema.* TO 'mcp_readonly'@'%';
+    GRANT SELECT ON information_schema.* TO 'mcp_readonly'@'%';
+    GRANT SELECT ON mysql.* TO 'mcp_readonly'@'%';
+
+    -- Set connection limits for MCP user
+    ALTER USER 'mcp_readonly'@'%' WITH MAX_USER_CONNECTIONS 10;
+    ALTER USER 'mcp_readonly'@'%' WITH MAX_QUERIES_PER_HOUR 10000;
+
+    -- Flush privileges to apply changes
+    FLUSH PRIVILEGES;
+
+    -- Verify users were created
+    SELECT User, Host, max_user_connections FROM mysql.user WHERE User IN ('app_user', 'mcp_readonly');

@@ -1,0 +1,18 @@
+# Minimal requirements for MariaDB MCP server
+# No ML/embedding packages - just database and MCP functionality
+
+# MCP framework
+fastmcp[websockets]==2.12.1
+
+# Database connectivity (async)
+asyncmy>=0.2.10
+
+# Environment configuration
+python-dotenv>=1.0.0
+
+# Core dependencies (pulled in by fastmcp but listing explicitly)
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# HTTP server for running in HTTP transport mode
+uvicorn>=0.30.0

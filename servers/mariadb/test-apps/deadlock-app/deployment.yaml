@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deadlock-app
+  namespace: mariadb
+  labels:
+    app: deadlock-app
+    role: test-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deadlock-app
+  template:
+    metadata:
+      labels:
+        app: deadlock-app
+        role: test-app
+    spec:
+      containers:
+      - name: deadlock-generator
+        image: python:3.11-slim
+        command:
+        - sh
+        - -c
+        - |
+          # Install dependencies
+          pip install mysql-connector-python
+          # Run the application
+          python /app/app.py
+        env:
+        - name: DB_HOST
+          value: "mariadb-service.mariadb.svc.cluster.local"
+        - name: DB_PORT
+          value: "3306"
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-app-secret
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-app-secret
+              key: password
+        - name: DB_NAME
+          value: "testdb"
+        - name: DEADLOCK_FREQUENCY
+          value: "10"  # Generate deadlocks every 10 seconds
+        - name: THREAD_COUNT
+          value: "4"   # Use 4 threads for concurrent transactions
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+      initContainers:
+      - name: wait-for-db
+        image: busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for MariaDB to be ready..."
+          until nc -z mariadb-service.mariadb.svc.cluster.local 3306; do
+            echo "MariaDB not ready yet. Waiting..."
+            sleep 5
+          done
+          echo "MariaDB is ready!"
+      volumes:
+      - name: app-code
+        configMap:
+          name: deadlock-app-config
+          defaultMode: 0755
