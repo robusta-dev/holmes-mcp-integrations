@@ -9,6 +9,7 @@ import os
 import json
 import logging
 import asyncio
+import ssl
 from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
 
@@ -34,6 +35,14 @@ DB_CONFIG = {
     "charset": os.getenv("DB_CHARSET", "utf8mb4"),
 }
 
+# SSL configuration
+DB_SSL = os.getenv("DB_SSL", "false").lower() == "true"
+DB_SSL_CA = os.getenv("DB_SSL_CA", "")  # Path to CA certificate
+DB_SSL_CERT = os.getenv("DB_SSL_CERT", "")  # Path to client certificate
+DB_SSL_KEY = os.getenv("DB_SSL_KEY", "")  # Path to client private key
+DB_SSL_VERIFY_CERT = os.getenv("DB_SSL_VERIFY_CERT", "true").lower() == "true"
+DB_SSL_VERIFY_IDENTITY = os.getenv("DB_SSL_VERIFY_IDENTITY", "false").lower() == "true"
+
 # MCP configuration
 READ_ONLY = os.getenv("MCP_READ_ONLY", "true").lower() == "true"
 MAX_ROWS = int(os.getenv("MCP_MAX_ROWS", 1000))
@@ -49,24 +58,74 @@ mcp = FastMCP(
 db_pool = None
 
 
+def create_ssl_context():
+    """Create SSL context for secure database connections"""
+    if not DB_SSL:
+        return None
+
+    ssl_context = ssl.create_default_context()
+
+    if DB_SSL_CA:
+        ca_path = os.path.expanduser(DB_SSL_CA)
+        if os.path.exists(ca_path):
+            ssl_context.load_verify_locations(cafile=ca_path)
+            logger.info(f"Loaded CA certificate from: {ca_path}")
+        else:
+            logger.warning(f"CA certificate file not found: {ca_path}")
+
+    if DB_SSL_CERT and DB_SSL_KEY:
+        cert_path = os.path.expanduser(DB_SSL_CERT)
+        key_path = os.path.expanduser(DB_SSL_KEY)
+
+        if os.path.exists(cert_path) and os.path.exists(key_path):
+            ssl_context.load_cert_chain(cert_path, key_path)
+            logger.info(f"Loaded client certificate from: {cert_path}")
+        else:
+            logger.warning(f"Client certificate or key not found: cert={cert_path}, key={key_path}")
+
+    if not DB_SSL_VERIFY_CERT:
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        logger.info("SSL certificate verification disabled")
+    elif not DB_SSL_VERIFY_IDENTITY:
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        logger.info("SSL certificate verification enabled, hostname verification disabled")
+    else:
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        logger.info("Full SSL verification enabled")
+
+    return ssl_context
+
+
 @asynccontextmanager
 async def get_db_connection():
     """Get a database connection from the pool"""
     global db_pool
 
     if db_pool is None:
-        # Create connection pool
-        db_pool = await asyncmy.create_pool(
-            host=DB_CONFIG["host"],
-            port=DB_CONFIG["port"],
-            user=DB_CONFIG["user"],
-            password=DB_CONFIG["password"],
-            db=DB_CONFIG["database"],
-            charset=DB_CONFIG["charset"],
-            maxsize=MAX_POOL_SIZE,
-            minsize=1,
-            autocommit=True,
-        )
+        pool_params = {
+            "host": DB_CONFIG["host"],
+            "port": DB_CONFIG["port"],
+            "user": DB_CONFIG["user"],
+            "password": DB_CONFIG["password"],
+            "db": DB_CONFIG["database"],
+            "charset": DB_CONFIG["charset"],
+            "maxsize": MAX_POOL_SIZE,
+            "minsize": 1,
+            "autocommit": True,
+        }
+
+        # Add SSL context if configured
+        ssl_context = create_ssl_context()
+        if ssl_context:
+            pool_params["ssl"] = ssl_context
+            logger.info("Creating connection pool with SSL enabled")
+        else:
+            logger.info("Creating connection pool without SSL")
+
+        db_pool = await asyncmy.create_pool(**pool_params)
 
     async with db_pool.acquire() as conn:
         async with conn.cursor() as cursor:
@@ -490,6 +549,12 @@ if __name__ == "__main__":
     logger.info(f"Database: {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}")
     logger.info(f"Read-only mode: {READ_ONLY}")
     logger.info(f"Max rows: {MAX_ROWS}")
+    logger.info(f"SSL enabled: {DB_SSL}")
+    if DB_SSL:
+        logger.info(f"  CA certificate: {DB_SSL_CA if DB_SSL_CA else 'Not configured'}")
+        logger.info(f"  Client certificate: {DB_SSL_CERT if DB_SSL_CERT else 'Not configured'}")
+        logger.info(f"  Verify certificate: {DB_SSL_VERIFY_CERT}")
+        logger.info(f"  Verify hostname: {DB_SSL_VERIFY_IDENTITY}")
 
     # Parse command line arguments for transport mode
     if "--transport" in sys.argv and "http" in sys.argv:

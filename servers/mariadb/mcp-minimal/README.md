@@ -56,11 +56,22 @@ kubectl apply -f service.yaml
 
 The server uses environment variables:
 
+### Database Connection
 - `DB_HOST`: MariaDB host
 - `DB_PORT`: MariaDB port (default: 3306)
 - `DB_USER`: Database username
 - `DB_PASSWORD`: Database password
 - `DB_NAME`: Default database
+
+### SSL/TLS Configuration
+- `DB_SSL`: Enable SSL connection (default: false)
+- `DB_SSL_CA`: Path to CA certificate file
+- `DB_SSL_CERT`: Path to client certificate file
+- `DB_SSL_KEY`: Path to client private key file
+- `DB_SSL_VERIFY_CERT`: Verify server certificate (default: true)
+- `DB_SSL_VERIFY_IDENTITY`: Verify server hostname identity (default: false)
+
+### MCP Configuration
 - `MCP_READ_ONLY`: Enforce read-only mode (default: true)
 - `MCP_MAX_ROWS`: Maximum rows to return (default: 1000)
 - `MCP_MAX_POOL_SIZE`: Connection pool size (default: 5)
@@ -92,6 +103,8 @@ mcp_servers:
 
 ## Testing the Server Locally
 
+### Basic Setup (No SSL)
+
 1. Run MariaDB locally:
 ```bash
 docker run -d --name mariadb-test \
@@ -105,6 +118,36 @@ docker run -d --name mariadb-test \
 export DB_HOST=localhost
 export DB_USER=root
 export DB_PASSWORD=test123
+python server.py --transport http --host 0.0.0.0 --port 8000
+```
+
+### With SSL/TLS
+
+1. Run MariaDB with SSL enabled:
+```bash
+docker run -d --name mariadb-ssl \
+  -e MYSQL_ROOT_PASSWORD=test123 \
+  -p 3306:3306 \
+  mariadb:11 --ssl
+```
+
+2. Configure and run the MCP server with SSL:
+```bash
+export DB_HOST=localhost
+export DB_USER=root
+export DB_PASSWORD=test123
+export DB_SSL=true
+export DB_SSL_CA=/path/to/ca-cert.pem
+export DB_SSL_CERT=/path/to/client-cert.pem
+export DB_SSL_KEY=/path/to/client-key.pem
+export DB_SSL_VERIFY_CERT=true
+python server.py --transport http --host 0.0.0.0 --port 8000
+```
+
+For self-signed certificates or testing, you can disable verification:
+```bash
+export DB_SSL=true
+export DB_SSL_VERIFY_CERT=false
 python server.py --transport http --host 0.0.0.0 --port 8000
 ```
 
