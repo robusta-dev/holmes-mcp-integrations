@@ -24,20 +24,19 @@ The GCP MCP addon provides three specialized servers:
 Run the automated setup script to create a GCP service account with appropriate permissions:
 
 ```bash
-# Single project with basic permissions (recommended for most users)
+# Single project setup
 ./setup-gcp-service-account.sh --project my-project --k8s-namespace holmes
 
-# Multi-project with comprehensive permissions (advanced monitoring)
+# Multi-project setup
 ./setup-gcp-service-account.sh \
   --project primary-project \
   --other-projects dev-project,staging-project,prod-project \
-  --comprehensive \
   --k8s-namespace holmes
 ```
 
 The script will:
 - Create a GCP service account
-- Grant appropriate read-only IAM roles
+- Grant ~50 optimized read-only IAM roles for incident response
 - Generate a service account key
 - Create a Kubernetes secret (`gcp-sa-key`)
 
@@ -100,27 +99,36 @@ Options:
   -o, --other-projects PROJECTS  Comma-separated additional projects
   -k, --key-file PATH            Key file path (default: ~/SA_NAME-key.json)
   -s, --k8s-namespace NAMESPACE  Kubernetes namespace (default: default)
-  -c, --comprehensive            Grant comprehensive roles (70+ read-only roles)
   --no-k8s-secret               Skip creating Kubernetes secret
   -h, --help                     Show help message
 ```
 
-### Permission Modes
+### Permissions Granted
 
-**Basic Mode (default)** - 6 essential roles:
-- `roles/viewer` - Basic resource viewing
-- `roles/logging.viewer` - Cloud Logging access
-- `roles/monitoring.viewer` - Cloud Monitoring metrics
-- `roles/compute.viewer` - Compute Engine resources
+The script grants ~50 optimized read-only roles designed for incident response and troubleshooting:
+
+**What's Included:**
+- ✅ Complete audit log visibility (who changed what)
+- ✅ Full networking troubleshooting (firewalls, load balancers, SSL)
+- ✅ Database and BigQuery metadata (schemas, configurations)
+- ✅ Security findings and IAM analysis
+- ✅ Container and Kubernetes visibility
+- ✅ Monitoring, logging, and tracing
+
+**Security Boundaries:**
+- ❌ NO actual data access (cannot read storage objects or BigQuery data)
+- ❌ NO secret values (only metadata)
+- ❌ NO write permissions
+
+Key roles include:
+- `roles/browser` - Navigate org/folder/project hierarchy
+- `roles/logging.privateLogViewer` - Audit logs and data access logs
+- `roles/compute.viewer` - VMs, firewalls, load balancers
 - `roles/container.viewer` - GKE clusters and workloads
-- `roles/storage.objectViewer` - Cloud Storage read access
-
-**Comprehensive Mode** (`--comprehensive`) - 70+ read-only roles:
-- All basic roles plus...
-- Cloud SQL, BigQuery, Pub/Sub viewers
-- Security and IAM analyzers
-- Networking and load balancer viewers
-- Full list in `gcp-readonly-roles.txt`
+- `roles/monitoring.viewer` - Metrics and alerts
+- `roles/iam.securityReviewer` - IAM policies
+- `roles/storage.legacyBucketReader` - Bucket metadata (no object access)
+- `roles/bigquery.metadataViewer` - Table schemas only
 
 ### Multi-Project Configuration
 
@@ -129,13 +137,14 @@ For organizations with multiple GCP projects:
 ```bash
 ./setup-gcp-service-account.sh \
   --project primary-project \
-  --other-projects dev,staging,prod \
-  --comprehensive
+  --other-projects dev,staging,prod
 ```
 
 This creates a service account with:
-- **Primary project**: Full role set (basic or comprehensive)
-- **Other projects**: Basic roles only
+- **Primary project**: Full set of ~50 optimized roles
+- **Other projects**: Same optimized roles across all projects
+
+The service account can investigate resources across all specified projects.
 
 ### Manual Setup (Alternative)
 
@@ -147,13 +156,13 @@ gcloud iam service-accounts create holmes-gcp-mcp \
   --display-name="Holmes GCP MCP Service Account"
 ```
 
-2. Grant roles:
+2. Grant roles (example with essential roles):
 ```bash
 PROJECT_ID=your-project
 SA_EMAIL=holmes-gcp-mcp@${PROJECT_ID}.iam.gserviceaccount.com
 
-# Basic roles
-for role in viewer logging.viewer monitoring.viewer compute.viewer container.viewer storage.objectViewer; do
+# Essential roles for basic functionality
+for role in browser compute.viewer container.viewer logging.privateLogViewer monitoring.viewer; do
   gcloud projects add-iam-policy-binding ${PROJECT_ID} \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="roles/${role}"
@@ -195,7 +204,7 @@ gcloud projects get-iam-policy PROJECT_ID \
   --flatten="bindings[].members" \
   --filter="bindings.members:holmes-gcp-mcp@"
 
-# Solution: Re-run setup with --comprehensive flag
+# Solution: Check if the required role is granted
 ```
 
 **Pod Not Starting**
@@ -215,17 +224,11 @@ Note: gcloud CLI doesn't support Workload Identity token refresh, so service acc
 
 ## Security Best Practices
 
-1. **Use Least Privilege**: Start with basic roles, only use `--comprehensive` if needed
+1. **Least Privilege**: The script only grants read-only roles without data access
 2. **Rotate Keys Regularly**: Re-run setup script every 90 days
 3. **Delete Local Keys**: Remove key files after creating Kubernetes secret
 4. **Monitor Usage**: Check audit logs for service account activity
 5. **Enable Network Policies**: Set `networkPolicy.enabled: true` in Helm values
-
-## IAM Permissions Reference
-
-The setup script only grants read-only roles. Never grant `roles/owner` or `roles/editor`.
-
-See `gcp-readonly-roles.txt` for the complete list of roles used in comprehensive mode.
 
 ## Docker Images
 
