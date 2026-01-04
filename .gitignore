@@ -205,3 +205,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+servers/aws/tmp/multi-cluster-config.yaml
+servers/aws/tmp/test.yaml

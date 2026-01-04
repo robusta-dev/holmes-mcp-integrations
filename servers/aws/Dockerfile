@@ -1,20 +1,21 @@
-# AWS API MCP Server with Supergateway
-# Uses Supergateway base image and adds Python
-
 FROM supercorp/supergateway:latest
 
-# Switch to root to install Python
 USER root
-
-# Update npm to latest version for cve handling
 RUN npm install -g npm@latest
-
 RUN apk add --no-cache python3 py3-pip
 
-# Install AWS API MCP server
-RUN pip3 install --no-cache-dir --break-system-packages awslabs.aws-api-mcp-server
+# Install original AWS MCP server + our auth
+RUN pip3 install --no-cache-dir --break-system-packages \
+    awslabs.aws-api-mcp-server \
+    boto3 \
+    pyyaml
+
+# Copy our auth wrapper
+COPY aws_auth.py /app/
+COPY wrapper.py /app/
 
 USER node
 EXPOSE 8000
 
-CMD ["--port", "8000", "--stdio", "python3 -m awslabs.aws_api_mcp_server.server"]
+# Use --stdio (not --sse) for command execution
+CMD ["--port", "8000", "--stdio", "python3 /app/wrapper.py"]

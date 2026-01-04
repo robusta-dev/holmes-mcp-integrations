@@ -1,0 +1,185 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CostExplorerAccess",
+      "Effect": "Allow",
+      "Action": [
+        "ce:GetCostAndUsage",
+        "ce:GetUsageReport",
+        "ce:GetDimensionValues",
+        "ce:GetRightsizingRecommendation",
+        "ce:GetSavingsUtilization",
+        "ce:GetReservationCoverage",
+        "ce:GetReservationPurchaseRecommendation",
+        "ce:GetReservationUtilization",
+        "ce:GetCostCategories",
+        "ce:GetServices",
+        "ce:ListCostCategoryDefinitions",
+        "ce:DescribeCostCategoryDefinition"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BillingAccess",
+      "Effect": "Allow",
+      "Action": [
+        "budgets:ViewBudget",
+        "budgets:DescribeBudgets",
+        "budgets:DescribeBudgetAction*",
+        "budgets:DescribeBudgetActionsForBudget",
+        "budgets:DescribeBudgetActionsForAccount",
+        "cur:DescribeReportDefinitions"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ComputeResourcesAccess",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:Get*",
+        "eks:Describe*",
+        "eks:List*",
+        "ecs:Describe*",
+        "ecs:List*",
+        "lambda:Get*",
+        "lambda:List*",
+        "autoscaling:Describe*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DatabaseResourcesAccess", 
+      "Effect": "Allow",
+      "Action": [
+        "rds:Describe*",
+        "rds:List*",
+        "dynamodb:Describe*",
+        "dynamodb:List*",
+        "elasticache:Describe*",
+        "redshift:Describe*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "StorageResourcesAccess",
+      "Effect": "Allow", 
+      "Action": [
+        "s3:List*",
+        "s3:Get*",
+        "s3:DescribeJob",
+        "ebs:Describe*",
+        "efs:Describe*",
+        "fsx:Describe*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NetworkingResourcesAccess",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:Describe*",
+        "elasticloadbalancing:Get*",
+        "cloudfront:Get*",
+        "cloudfront:List*",
+        "route53:Get*",
+        "route53:List*",
+        "vpc-lattice:Get*",
+        "vpc-lattice:List*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "MonitoringAndLogsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:*",
+        "logs:*",
+        "xray:Get*",
+        "xray:BatchGet*",
+        "application-insights:Describe*",
+        "application-insights:List*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SecurityAndComplianceAccess",
+      "Effect": "Allow",
+      "Action": [
+        "iam:Get*",
+        "iam:List*",
+        "iam:Generate*",
+        "iam:Simulate*",
+        "cloudtrail:LookupEvents",
+        "cloudtrail:Get*",
+        "cloudtrail:Describe*",
+        "config:Get*",
+        "config:Describe*",
+        "config:List*",
+        "access-analyzer:Get*",
+        "access-analyzer:List*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OrganizationsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "organizations:Describe*",
+        "organizations:List*",
+        "account:Get*",
+        "account:List*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SupportAccess",
+      "Effect": "Allow",
+      "Action": [
+        "support:Describe*",
+        "support:Get*",
+        "trustedadvisor:Describe*",
+        "trustedadvisor:Get*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ApplicationServicesAccess",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "sns:Get*",
+        "sns:List*",
+        "sqs:Get*",
+        "sqs:List*",
+        "kinesis:Describe*",
+        "kinesis:List*",
+        "kafka:Describe*",
+        "kafka:List*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IdentityAccess",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity",
+        "sts:GetAccessKeyInfo",
+        "sts:DecodeAuthorizationMessage"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ResourceGroupsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "resource-groups:Get*",
+        "resource-groups:List*",
+        "resource-groups:Search*",
+        "tag:Get*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
