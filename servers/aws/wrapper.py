@@ -4,6 +4,7 @@ import os
 import sys
 import logging
 import shlex
+import subprocess
 
 from aws_auth import setup_aws_profiles, has_valid_config, config_file_exists, AWS_ACCOUNT_ROLES_FILE
 
@@ -24,7 +25,9 @@ def main():
         cmd_parts = shlex.split(cmd)
         
         logger.info(f"Running: {cmd}")
-        os.execvp(cmd_parts[0], cmd_parts)
+        # Use subprocess to keep wrapper alive so refresh thread continues
+        proc = subprocess.Popen(cmd_parts)
+        sys.exit(proc.wait())
         
     except Exception as e:
         logger.error(f"Failed to start: {e}", exc_info=True)
