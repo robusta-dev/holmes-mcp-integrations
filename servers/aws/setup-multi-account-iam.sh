@@ -5,7 +5,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; MAGENTA='\033[0;35m'; NC='\033[0m'
 
 CONFIG_FILE="${2:-multi-cluster-config.yaml}"
-PERMISSIONS_FILE="${3:-./aws-mcp-iam-policy.json}"
+PERMISSIONS_FILE="${3:-aws-mcp-iam-policy.json}"
 ACTION="${1:-}"
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -18,7 +18,7 @@ usage() {
     echo "Usage: $0 <setup|teardown|verify> [config-file] [permissions-file]"
     echo "Commands: setup, teardown, verify"
     echo "Default config-file: multi-cluster-config.yaml"
-    echo "Default permissions-file: ../aws-mcp-iam-policy.json"
+    echo "Default permissions-file: aws-mcp-iam-policy.json"
     exit 1
 }
 
