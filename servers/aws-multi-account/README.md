@@ -50,6 +50,13 @@ kubectl get pods -l app=holmes-aws-mcp
   - Safe: won't overwrite existing resources, uses auto-suffix for conflicts
   - Usage: `./setup-irsa.sh --cluster-name <name> --region <region> [--namespace <namespace>]`
 
+- **`setup-multi-account-iam.sh`** - Sets up cross-account OIDC and IAM roles for multiple AWS accounts
+  - Configures `assume_role_with_web_identity` across multiple target accounts
+  - Creates OIDC providers in target accounts for each source cluster
+  - Creates IAM roles in target accounts that can be assumed from any configured cluster
+  - Usage: `./setup-multi-account-iam.sh setup [config-file] [permissions-file]`
+  - Requires a YAML config file defining clusters and target accounts (see `multi-cluster-config-example.yaml`)
+
 - **`enable-oidc-provider.sh`** - Enables OIDC provider for EKS cluster (prerequisite for IRSA)
 
 ## Understanding IRSA Requirements
@@ -119,7 +126,123 @@ Example for multiple clusters:
 # - Service account in each cluster
 ```
 
-### 3. Docker Image - SSE API Wrapper
+### 3. Multi-Account Setup with setup-multi-account-iam.sh
+
+For scenarios where you need to access multiple AWS accounts from your EKS clusters, use `setup-multi-account-iam.sh`. This script sets up cross-account OIDC providers and IAM roles that enable `assume_role_with_web_identity` across all your accounts.
+
+#### When to Use Multi-Account Setup
+
+- You have multiple AWS accounts (dev, staging, prod, etc.)
+- You want pods in any cluster to access resources in target accounts
+- You need centralized IAM role management across accounts
+- You're using AWS Organizations or multi-account architectures
+
+#### How It Works
+
+The script creates:
+1. **OIDC Providers** in each target account for each source cluster
+2. **IAM Roles** in target accounts that can be assumed via `assume_role_with_web_identity`
+3. **Trust Policies** that allow pods from any configured cluster to assume the role
+
+This enables pods running in any of your clusters to assume roles in target accounts and access AWS resources there.
+
+#### Configuration File
+
+Create a YAML config file (see `multi-cluster-config-example.yaml` for reference):
+
+```yaml
+clusters:
+  - name: prod-cluster
+    region: us-east-1
+    account_id: "1111111111"
+    oidc_issuer_id: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    oidc_issuer_url: https://oidc.eks.us-east-1.amazonaws.com/id/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+  - name: staging-cluster
+    region: us-west-2
+    account_id: "1111111111"
+    oidc_issuer_id: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+    oidc_issuer_url: https://oidc.eks.us-west-2.amazonaws.com/id/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+
+kubernetes:
+  namespace: default
+  service_account: multi-account-mcp-sa
+
+iam:
+  role_name: EKSMultiAccountMCPRole
+  policy_name: MCPReadOnlyPolicy
+  session_duration: 3600
+
+target_accounts:
+  - profile: dev
+    account_id: "1111111111"
+    description: "Development account"
+    
+  - profile: prod
+    account_id: "2222222222"
+    description: "Production account"
+```
+
+#### Getting OIDC Issuer Information
+
+For each cluster, you need the OIDC issuer ID and URL:
+
+```bash
+# Get OIDC issuer URL
+aws eks describe-cluster --name <cluster-name> --query "cluster.identity.oidc.issuer" --output text
+
+# Extract issuer ID from the URL
+# URL format: https://oidc.eks.<region>.amazonaws.com/id/<ISSUER_ID>
+```
+
+#### Running the Setup
+
+```bash
+# Basic usage (uses default config: multi-cluster-config.yaml)
+./setup-multi-account-iam.sh setup
+
+# With custom config file
+./setup-multi-account-iam.sh setup my-config.yaml
+
+# With custom permissions file
+./setup-multi-account-iam.sh setup my-config.yaml ./aws-mcp-iam-policy.json
+
+# Verify the setup
+./setup-multi-account-iam.sh verify my-config.yaml
+
+# Teardown (removes all created resources)
+./setup-multi-account-iam.sh teardown my-config.yaml
+```
+
+#### What the Script Does
+
+For each target account:
+1. **Creates OIDC Providers**: Sets up OIDC providers for each cluster in the target account
+2. **Creates IAM Role**: Creates a role with trust policy allowing `assume_role_with_web_identity` from all configured clusters
+3. **Attaches Permissions**: Applies the read-only permissions policy to the role
+
+#### Prerequisites
+
+- AWS CLI configured with profiles for each target account
+- `jq` and `yq` installed (`brew install jq yq` or `apt-get install jq yq`)
+- Permissions to create IAM roles and OIDC providers in target accounts
+- OIDC issuer information for each source cluster
+
+#### Example: Accessing Multiple Accounts
+
+After setup, pods in any cluster can assume the role in target accounts:
+
+```bash
+# In a pod, assume role in target account
+aws sts assume-role-with-web-identity \
+  --role-arn arn:aws:iam::2222222222:role/EKSMultiAccountMCPRole \
+  --role-session-name pod-session \
+  --web-identity-token file:///var/run/secrets/eks.amazonaws.com/serviceaccount/token
+```
+
+The AWS SDK will automatically handle this when configured with the correct role ARN.
+
+### 4. Docker Image - SSE API Wrapper
 
 The AWS MCP server is originally a stdio-based tool. To make it accessible as a remote MCP server in Kubernetes, we wrap it with Supergateway, which converts stdio communication to an SSE (Server-Sent Events) API.
 
@@ -140,7 +263,7 @@ docker build -t your-registry/aws-api-mcp-server:latest .
 docker push your-registry/aws-api-mcp-server:latest
 ```
 
-### 6. Verify the Setup
+### 5. Verify the Setup
 
 #### Test IRSA Configuration
 ```bash
