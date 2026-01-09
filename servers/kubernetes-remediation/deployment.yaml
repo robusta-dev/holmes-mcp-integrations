@@ -25,9 +25,9 @@ spec:
           protocol: TCP
         env:
         # Allowed kubectl subcommands (comma-separated)
-        # Read-only by default, add write commands as needed
+        # Includes remediation commands by default
         - name: KUBECTL_ALLOWED_COMMANDS
-          value: "get,describe,logs"
+          value: "get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate"
 
         # Dangerous flags that are always blocked
         - name: KUBECTL_DANGEROUS_FLAGS

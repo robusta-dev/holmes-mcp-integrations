@@ -85,7 +85,7 @@ Get the current configuration of the MCP server for debugging purposes.
 **Returns:**
 ```json
 {
-  "allowed_commands": ["get", "describe", "logs"],
+  "allowed_commands": ["annotate", "cordon", "delete", "describe", "drain", "edit", "get", "label", "logs", "patch", "rollout", "scale", "taint", "uncordon"],
   "dangerous_flags": ["--kubeconfig", "--context", "..."],
   "timeout_seconds": 60,
   "allowed_images": ["alpine", "busybox"],
@@ -99,7 +99,7 @@ Configure the server using environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `KUBECTL_ALLOWED_COMMANDS` | Comma-separated list of allowed subcommands | `get,describe,logs` |
+| `KUBECTL_ALLOWED_COMMANDS` | Comma-separated list of allowed subcommands | `get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate` |
 | `KUBECTL_DANGEROUS_FLAGS` | Comma-separated list of blocked flags | `--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid` |
 | `KUBECTL_TIMEOUT` | Command timeout in seconds | `60` |
 | `KUBECTL_ALLOWED_IMAGES` | Comma-separated list of allowed images for `run_image` | (empty = tool disabled) |
@@ -107,22 +107,22 @@ Configure the server using environment variables:
 
 ### Example Configurations
 
-**Read-only (default):**
+**Full remediation (default):**
+```yaml
+- name: KUBECTL_ALLOWED_COMMANDS
+  value: "get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate"
+```
+
+**Read-only (restricted):**
 ```yaml
 - name: KUBECTL_ALLOWED_COMMANDS
   value: "get,describe,logs"
 ```
 
-**Remediation enabled:**
-```yaml
-- name: KUBECTL_ALLOWED_COMMANDS
-  value: "get,describe,logs,delete,patch,scale,rollout"
-```
-
 **With debug images:**
 ```yaml
 - name: KUBECTL_ALLOWED_COMMANDS
-  value: "get,describe,logs,delete,run"
+  value: "get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run"
 - name: KUBECTL_ALLOWED_IMAGES
   value: "curlimages/curl,busybox,alpine,nicolaka/netshoot"
 ```
@@ -162,42 +162,30 @@ Even though `shell=False` is used, these characters are rejected as defense in d
 
 ## RBAC Configuration
 
-The MCP server relies on Kubernetes RBAC for access control. The `rbac.yaml` file provides templates.
+The MCP server relies on Kubernetes RBAC for access control. The `rbac.yaml` file provides the necessary permissions for all default remediation commands.
 
-### Read-Only Access (Default)
+### Default Permissions
 
-The default configuration provides read-only access to common resources:
+The default RBAC configuration supports all remediation commands:
 
-```yaml
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "pods/log", "services", "configmaps", "events"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "daemonsets", "replicasets", "statefulsets"]
-    verbs: ["get", "list", "watch"]
-```
+| Command | Required RBAC Permissions |
+|---------|---------------------------|
+| `get`, `describe`, `logs` | `get`, `list`, `watch` on resources |
+| `edit`, `patch` | `patch`, `update` on resources |
+| `delete` | `delete` on resources |
+| `scale` | `patch`, `update` on `deployments/scale`, `statefulsets/scale`, `replicasets/scale` |
+| `rollout` | `patch`, `update` on deployments, daemonsets, statefulsets |
+| `cordon`, `uncordon`, `taint` | `patch`, `update` on nodes |
+| `drain` | `patch` on nodes, `delete` on pods, `create` on pods/eviction |
+| `label`, `annotate` | `patch`, `update` on various resources |
 
-### Enabling Remediation
+### Restricting to Read-Only
 
-To enable write operations, uncomment the remediation rules in `rbac.yaml`:
+To restrict to read-only operations, use the commented read-only ClusterRole in `rbac.yaml` and update the allowed commands:
 
-```yaml
-# Pod remediation
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["delete", "patch"]
-
-# Deployment remediation
-- apiGroups: ["apps"]
-  resources: ["deployments", "deployments/scale"]
-  verbs: ["patch", "update"]
-```
-
-And update the allowed commands:
 ```yaml
 - name: KUBECTL_ALLOWED_COMMANDS
-  value: "get,describe,logs,delete,patch,scale"
+  value: "get,describe,logs"
 ```
 
 ### Namespace Scoping
@@ -259,8 +247,7 @@ mcp_servers:
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure for read-only
-export KUBECTL_ALLOWED_COMMANDS="get,describe,logs"
+# Use default remediation commands (or customize)
 export KUBECTL_TIMEOUT="30"
 
 # Run the server
@@ -326,9 +313,9 @@ kubernetes-remediation/
 
 ## Security Recommendations
 
-1. **Start with read-only** - Begin with `get,describe,logs` and add write commands only as needed
-2. **Use namespace-scoped RBAC** - Limit access to specific namespaces when possible
-3. **Audit logging** - Enable Kubernetes audit logging to track all API calls
-4. **Network policies** - Restrict network access to the MCP server
-5. **Image scanning** - If using `run_image`, only allow scanned and approved images
-6. **Regular review** - Periodically review RBAC permissions and allowed commands
+1. **Use namespace-scoped RBAC** - Limit access to specific namespaces when possible instead of cluster-wide
+2. **Audit logging** - Enable Kubernetes audit logging to track all API calls made by the service account
+3. **Network policies** - Restrict network access to the MCP server pod
+4. **Image scanning** - If using `run_image`, only allow scanned and approved images
+5. **Regular review** - Periodically review RBAC permissions and allowed commands
+6. **Restrict if needed** - For read-only use cases, set `KUBECTL_ALLOWED_COMMANDS=get,describe,logs`

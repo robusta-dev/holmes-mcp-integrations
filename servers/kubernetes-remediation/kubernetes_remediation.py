@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration from environment variables
 ALLOWED_COMMANDS = set(
-    os.getenv("KUBECTL_ALLOWED_COMMANDS", "get,describe,logs").split(",")
+    os.getenv("KUBECTL_ALLOWED_COMMANDS", "get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate").split(",")
 )
 
 DANGEROUS_FLAGS = set(
