@@ -3,11 +3,12 @@
 
 FROM python:3.11-slim
 
-# Install kubectl
+# Install kubectl (supports both amd64 and arm64)
 RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
-    && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && ARCH=$(dpkg --print-architecture) \
+    && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl" \
     && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl \
     && rm kubectl \
     && apt-get remove -y curl \
