@@ -1,0 +1,148 @@
+# ServiceAccount for the Kubernetes Remediation MCP Server
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubernetes-remediation-mcp-sa
+  labels:
+    app: kubernetes-remediation-mcp
+
+---
+# ClusterRole with edit permissions
+# Customize this based on your remediation needs
+# Start with read-only and add write permissions as needed
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubernetes-remediation-mcp-role
+  labels:
+    app: kubernetes-remediation-mcp
+rules:
+  # Read-only access to most resources (safe for debugging)
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+      - events
+      - namespaces
+      - nodes
+      - replicationcontrollers
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - daemonsets
+      - replicasets
+      - statefulsets
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
+
+  # Uncomment below for remediation write permissions
+  # WARNING: These permissions allow modifying cluster resources
+
+  # # Pod remediation (delete stuck pods, exec for debugging)
+  # - apiGroups: [""]
+  #   resources:
+  #     - pods
+  #   verbs: ["delete", "patch"]
+  #
+  # - apiGroups: [""]
+  #   resources:
+  #     - pods/exec
+  #   verbs: ["create"]
+  #
+  # # Deployment remediation (scale, restart)
+  # - apiGroups: ["apps"]
+  #   resources:
+  #     - deployments
+  #     - deployments/scale
+  #     - statefulsets
+  #     - statefulsets/scale
+  #     - daemonsets
+  #   verbs: ["patch", "update"]
+  #
+  # # ConfigMap/Secret updates
+  # - apiGroups: [""]
+  #   resources:
+  #     - configmaps
+  #     - secrets
+  #   verbs: ["patch", "update"]
+  #
+  # # Job management
+  # - apiGroups: ["batch"]
+  #   resources:
+  #     - jobs
+  #   verbs: ["delete", "create"]
+
+---
+# ClusterRoleBinding - grants cluster-wide access
+# For namespace-scoped access, use RoleBinding instead
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-remediation-mcp-binding
+  labels:
+    app: kubernetes-remediation-mcp
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-remediation-mcp-sa
+    namespace: default  # Change to your namespace
+roleRef:
+  kind: ClusterRole
+  name: kubernetes-remediation-mcp-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Alternative: Namespace-scoped Role and RoleBinding
+# Use this instead of ClusterRole/ClusterRoleBinding for restricted access
+#
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: Role
+# metadata:
+#   name: kubernetes-remediation-mcp-role
+#   namespace: target-namespace
+#   labels:
+#     app: kubernetes-remediation-mcp
+# rules:
+#   # Same rules as ClusterRole above
+#   - apiGroups: [""]
+#     resources: ["pods", "pods/log", "services", "configmaps"]
+#     verbs: ["get", "list", "watch"]
+#
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: RoleBinding
+# metadata:
+#   name: kubernetes-remediation-mcp-binding
+#   namespace: target-namespace
+#   labels:
+#     app: kubernetes-remediation-mcp
+# subjects:
+#   - kind: ServiceAccount
+#     name: kubernetes-remediation-mcp-sa
+#     namespace: default
+# roleRef:
+#   kind: Role
+#   name: kubernetes-remediation-mcp-role
+#   apiGroup: rbac.authorization.k8s.io

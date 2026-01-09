@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubernetes-remediation-mcp
+  labels:
+    app: kubernetes-remediation-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubernetes-remediation-mcp
+  template:
+    metadata:
+      labels:
+        app: kubernetes-remediation-mcp
+    spec:
+      serviceAccountName: kubernetes-remediation-mcp-sa
+      containers:
+      - name: mcp-server
+        image: kubernetes-remediation-mcp:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        # Allowed kubectl subcommands (comma-separated)
+        # Read-only by default, add write commands as needed
+        - name: KUBECTL_ALLOWED_COMMANDS
+          value: "get,describe,logs"
+
+        # Dangerous flags that are always blocked
+        - name: KUBECTL_DANGEROUS_FLAGS
+          value: "--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid"
+
+        # Command timeout in seconds
+        - name: KUBECTL_TIMEOUT
+          value: "60"
+
+        # Allowed images for run_image tool (empty = disabled)
+        # Uncomment and configure to enable run_image tool
+        # - name: KUBECTL_ALLOWED_IMAGES
+        #   value: "curlimages/curl,busybox,alpine,python:3.11-slim"
+
+        - name: LOG_LEVEL
+          value: "INFO"
+
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+
+        livenessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        securityContext:
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
