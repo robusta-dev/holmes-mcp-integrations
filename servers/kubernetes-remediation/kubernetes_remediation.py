@@ -18,7 +18,8 @@ import os
 import subprocess
 import logging
 import re
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List, Optional, Union
 
 from fastmcp import FastMCP
 from dotenv import load_dotenv
@@ -200,25 +201,46 @@ def run_kubectl(args: List[str]) -> Dict[str, Any]:
         }
 
 
+def parse_args(args: Union[str, List[str]]) -> List[str]:
+    """
+    Parse args from either a JSON string or a list.
+
+    Handles cases where the client accidentally sends a JSON-encoded string
+    instead of an actual array.
+    """
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+            if isinstance(parsed, list):
+                return parsed
+            else:
+                raise ValueError(f"Expected array, got {type(parsed).__name__}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in args string: {e}")
+    return args
+
+
 @mcp.tool(
     name="kubectl",
     description="Execute a kubectl command with validated arguments. "
                 "The command is validated against an allowlist of safe subcommands "
                 "and dangerous flags are blocked."
 )
-def kubectl(args: List[str]) -> Dict[str, Any]:
+def kubectl(args: Union[str, List[str]]) -> Dict[str, Any]:
     """
     Execute a kubectl command with validated arguments.
 
     Args:
         args: Command arguments, e.g. ["get", "pods", "-n", "default"]
               or ["kubectl", "get", "pods"]
+              Can also be a JSON string: '["get", "pods"]'
 
     Returns:
         Dictionary with success status, stdout, stderr
     """
     try:
-        validated_args = validate_args(args)
+        parsed_args = parse_args(args)
+        validated_args = validate_args(parsed_args)
         return run_kubectl(validated_args)
     except ValueError as e:
         logger.warning(f"Validation failed: {e}")
@@ -237,7 +259,7 @@ def run_image(
     name: str,
     image: str,
     namespace: Optional[str] = None,
-    command: Optional[List[str]] = None,
+    command: Optional[Union[str, List[str]]] = None,
     rm: bool = True
 ) -> Dict[str, Any]:
     """
@@ -247,7 +269,7 @@ def run_image(
         name: Pod name (required)
         image: Image to run, must be in allowed list (required)
         namespace: Optional namespace
-        command: Optional command to run in container
+        command: Optional command to run in container (list or JSON string)
         rm: Delete pod after exit (default: True)
 
     Returns:
@@ -258,8 +280,11 @@ def run_image(
         validate_pod_name(name)
         validate_image(image)
 
+        # Parse command if it's a JSON string
+        parsed_command = None
         if command:
-            validate_command_args(command)
+            parsed_command = parse_args(command) if isinstance(command, str) else command
+            validate_command_args(parsed_command)
 
         # Build kubectl run command
         kubectl_args = ["run", name, f"--image={image}", "--restart=Never"]
@@ -274,9 +299,9 @@ def run_image(
             kubectl_args.extend(["--rm", "-i"])
 
         # Add command if provided
-        if command:
+        if parsed_command:
             kubectl_args.append("--")
-            kubectl_args.extend(command)
+            kubectl_args.extend(parsed_command)
 
         logger.info(f"Running pod with args: {kubectl_args}")
 
