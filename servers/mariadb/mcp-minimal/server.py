@@ -140,7 +140,7 @@ class QueryResult(BaseModel):
     query: str
 
 
-async def execute_query(query: str, params: Optional[tuple] = None) -> QueryResult:
+async def execute_query(query: str, params: Optional[tuple] = None, database: Optional[str] = None) -> QueryResult:
     """Execute a database query safely"""
     # Check for read-only mode
     if READ_ONLY:
@@ -151,6 +151,11 @@ async def execute_query(query: str, params: Optional[tuple] = None) -> QueryResu
             raise ValueError(f"Write operations not allowed in read-only mode: {query[:50]}...")
 
     async with get_db_connection() as cursor:
+        # If database is specified, select it first
+        if database:
+            await cursor.execute(f"USE `{database}`")
+
+        # Execute the actual query
         await cursor.execute(query, params)
 
         # Get column names
@@ -276,11 +281,8 @@ async def describe_table(database: str, table: str) -> Dict[str, Any]:
 async def execute_sql_query(query: str, database: Optional[str] = None) -> Dict[str, Any]:
     """Execute a SQL query"""
     try:
-        # If database is specified, prepend USE statement
-        if database:
-            query = f"USE `{database}`; {query}"
-
-        result = await execute_query(query)
+        # Pass the database parameter to execute_query
+        result = await execute_query(query, database=database)
 
         # Format response
         response = {
