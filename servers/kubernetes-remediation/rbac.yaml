@@ -17,14 +17,13 @@ metadata:
   labels:
     app: kubernetes-remediation-mcp
 rules:
-  # Core resources - read and write access
+  # Core resources - read and write access (secrets excluded)
   - apiGroups: [""]
     resources:
       - pods
       - services
       - endpoints
       - configmaps
-      - secrets
       - persistentvolumeclaims
       - replicationcontrollers
     verbs: ["get", "list", "watch", "patch", "update", "delete"]
