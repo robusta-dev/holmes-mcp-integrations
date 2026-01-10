@@ -30,11 +30,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy server code
 COPY kubernetes_remediation.py .
 
-# Create non-root user
-RUN useradd -m -s /bin/bash mcp && \
+# Create non-root user with explicit UID (required for runAsNonRoot)
+RUN useradd -m -s /bin/bash -u 1000 mcp && \
     chown -R mcp:mcp /app
 
-USER mcp
+USER 1000
 
 # Expose port for HTTP
 EXPOSE 8000
