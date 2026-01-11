@@ -1,0 +1,39 @@
+clusters:
+  - name: account-1-cluster-name
+    region: us-east-2
+    account_id: "1111111111"
+    oidc_issuer_id: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+    oidc_issuer_url: https://oidc.eks.us-east-2.amazonaws.com/id/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+
+  - name: account-1-cluster-2-name
+    region: us-east-2
+    account_id: "1111111111"
+    oidc_issuer_id: CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+    oidc_issuer_url: https://oidc.eks.us-east-2.amazonaws.com/id/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+  - name: account-2-cluster-name
+    region: us-east-1
+    account_id: "22222222"
+    oidc_issuer_id: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    oidc_issuer_url: https://oidc.eks.us-east-1.amazonaws.com/id/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+# Kubernetes configuration (same across all clusters)
+kubernetes:
+  namespace: default
+  service_account: multi-account-mcp-sa
+
+# IAM configuration
+iam:
+  role_name: EKSMultiAccountMCPRole
+  policy_name: MCPReadOnlyPolicy
+  session_duration: 3600
+
+# Target accounts to access from any cluster
+target_accounts:
+  - profile: dev
+    account_id: "1111111111"
+    description: "Development account"
+    
+  - profile: prod
+    account_id: "22222222"
+    description: "Production account"
