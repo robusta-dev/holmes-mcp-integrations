@@ -119,7 +119,9 @@ def _process_profiles_to_credentials(config: dict, token: str, default_region: s
             credential_file_lines = _credentials_to_file_lines(profile_name, creds)
             credentials_lines.extend(credential_file_lines)
             
-            account_id = profile_config.get('account_id', 'unknown')
+            account_id = profile_config.get('account_id')
+            if not account_id:
+                raise Exception(f"Missing 'account_id' in profile configuration {profile_name}")
             logger.info(f"✓ Processed profile: {profile_name} (account: {account_id}, region: {profile_region})")
         except Exception as e:
             logger.error(f"Failed to process profile '{profile_name}': {e}", exc_info=True)
@@ -176,6 +178,13 @@ def setup_aws_profiles(
     It needs to be global because setup_aws_profiles may be called multiple times, and we need
     to ensure only one refresh thread is running at a time.
     """
+    if not config_file_exists():
+        logger.info("No custom aws profile file found")
+        return
+    elif not has_valid_config():
+        logger.error(f"Custom config file {AWS_ACCOUNT_ROLES_FILE} invalid format, skipping profile setup")
+        return
+    
     global _refresh_thread
     
     with open(config_path, 'r') as f:
@@ -204,5 +213,8 @@ def setup_aws_profiles(
         )
         _refresh_thread.start()
         logger.info(f"Started credential refresh thread (interval: {AWS_REFRESH_CREDENTIALS_SEC} seconds)")
-    
-    return list(config['profiles'].keys())
+
+    profiles = list(config['profiles'].keys())
+    logger.info(f"Set up {len(profiles)} AWS profiles: {', '.join(profiles)}")
+
+    return

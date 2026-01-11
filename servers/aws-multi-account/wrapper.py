@@ -13,13 +13,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     try:
-        if not config_file_exists():
-            logger.info("No custom aws profile file found")
-        elif has_valid_config():
-            profiles = setup_aws_profiles()
-            logger.info(f"Set up {len(profiles)} AWS profiles: {', '.join(profiles)}")
-        else:
-            logger.error(f"Custom config file {AWS_ACCOUNT_ROLES_FILE} invalid format, skipping profile setup")
+        setup_aws_profiles()
         
         cmd = os.environ.get('AWS_MCP_SERVER_CMD', 'python3 -m awslabs.aws_api_mcp_server')
         cmd_parts = shlex.split(cmd)

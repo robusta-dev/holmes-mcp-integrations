@@ -15,19 +15,6 @@ Holmes → Remote MCP (SSE API) → Supergateway Wrapper → AWS MCP Server → 
                           (IAM Roles for Service Accounts)
 ```
 
-## Quick Start
-
-```bash
-# 1. Set up IRSA (one command creates everything)
-./setup-irsa.sh --cluster-name my-cluster --region us-east-1
-
-# 2. Deploy with Helm (enable in values.yaml)
-helm upgrade --install holmes ./helm/holmes --set mcpAddons.aws.enabled=true
-
-# 3. Verify it's working
-kubectl get pods -l app=holmes-aws-mcp
-```
-
 ## Resource Files in This Directory
 
 ### Core Files
@@ -44,89 +31,17 @@ kubectl get pods -l app=holmes-aws-mcp
   - Can be shared across multiple EKS clusters
   - No destructive operations allowed
 
-- **`setup-irsa.sh`** - Automated script to set up IRSA (IAM Roles for Service Accounts)
-  - Creates all necessary AWS and Kubernetes resources
-  - Handles the complete IRSA setup process
-  - Safe: won't overwrite existing resources, uses auto-suffix for conflicts
-  - Usage: `./setup-irsa.sh --cluster-name <name> --region <region> [--namespace <namespace>]`
-
 - **`setup-multi-account-iam.sh`** - Sets up cross-account OIDC and IAM roles for multiple AWS accounts
   - Configures `assume_role_with_web_identity` across multiple target accounts
   - Creates OIDC providers in target accounts for each source cluster
   - Creates IAM roles in target accounts that can be assumed from any configured cluster
-  - Usage: `./setup-multi-account-iam.sh setup [config-file] [permissions-file]`
+  - Usage: `./scripts/setup-multi-account-iam.sh setup [config-file] [permissions-file]`
   - Requires a YAML config file defining clusters and target accounts (see `multi-cluster-config-example.yaml`)
 
 - **`enable-oidc-provider.sh`** - Enables OIDC provider for EKS cluster (prerequisite for IRSA)
 
-## Understanding IRSA Requirements
 
-For the AWS MCP server to access AWS APIs from within Kubernetes, it needs IRSA (IAM Roles for Service Accounts). This involves four key components:
-
-1. **OIDC Provider**: Establishes trust between your EKS cluster and AWS IAM
-2. **IAM Policy** (`holmes-aws-mcp-policy`): Defines what AWS services can be accessed (read-only)
-3. **IAM Role** (`holmes-aws-mcp-role-{cluster-name}`): AWS identity that pods can assume
-4. **Service Account** (`aws-api-mcp-sa`): Kubernetes resource that links pods to the IAM role
-
-### How IRSA Works
-
-1. Pod starts with the configured service account
-2. AWS SDK in the pod reads the service account's IAM role annotation
-3. Pod exchanges its Kubernetes token for temporary AWS credentials
-4. Pod can now make AWS API calls with the permissions from the IAM policy
-
-## Setup Instructions
-
-### 1. Prerequisites
-
-- EKS cluster running
-- AWS CLI configured with permissions to create IAM roles/policies
-- kubectl configured to access your cluster
-- eksctl installed (for OIDC provider setup)
-
-### 2. Automated Setup with setup-irsa.sh
-
-The `setup-irsa.sh` script automates the entire IRSA setup process:
-
-```bash
-# Basic usage
-./setup-irsa.sh --cluster-name my-cluster --region us-east-1
-
-# With custom namespace
-./setup-irsa.sh --cluster-name my-cluster --region us-east-1 --namespace holmes
-
-# See all options
-./setup-irsa.sh --help
-```
-
-The script will:
-1. **Check Service Account**: Ensures no existing service account conflicts
-2. **Verify/Create OIDC Provider**: Sets up trust between EKS and IAM
-3. **Create/Reuse IAM Policy**: Uses existing `holmes-aws-mcp-policy` if found, creates if not
-4. **Create IAM Role**: Creates cluster-specific role with auto-suffix if needed
-5. **Create Service Account**: Sets up Kubernetes service account with IAM role annotation
-
-### Important Notes on Multi-Cluster Setup
-
-- **IAM Policy**: Can be shared across all clusters (created once, reused many times)
-- **IAM Roles**: Must be unique per cluster (each has cluster-specific trust relationship)
-- **Service Accounts**: Created in each cluster separately
-
-Example for multiple clusters:
-```bash
-# Cluster 1
-./setup-irsa.sh --cluster-name prod --region us-east-1
-
-# Cluster 2 (will reuse the same IAM policy)
-./setup-irsa.sh --cluster-name staging --region us-east-1
-
-# Results in:
-# - One shared policy: holmes-aws-mcp-policy
-# - Two roles: holmes-aws-mcp-role-prod, holmes-aws-mcp-role-staging
-# - Service account in each cluster
-```
-
-### 3. Multi-Account Setup with setup-multi-account-iam.sh
+### Multi-Account Setup with setup-multi-account-iam.sh
 
 For scenarios where you need to access multiple AWS accounts from your EKS clusters, use `setup-multi-account-iam.sh`. This script sets up cross-account OIDC providers and IAM roles that enable `assume_role_with_web_identity` across all your accounts.
 
@@ -199,19 +114,19 @@ aws eks describe-cluster --name <cluster-name> --query "cluster.identity.oidc.is
 
 ```bash
 # Basic usage (uses default config: multi-cluster-config.yaml)
-./setup-multi-account-iam.sh setup
+./scripts/setup-multi-account-iam.sh setup
 
 # With custom config file
-./setup-multi-account-iam.sh setup my-config.yaml
+./scripts/setup-multi-account-iam.sh setup my-config.yaml
 
 # With custom permissions file
-./setup-multi-account-iam.sh setup my-config.yaml ./aws-mcp-iam-policy.json
+./scripts/setup-multi-account-iam.sh setup my-config.yaml ./aws-mcp-iam-policy.json
 
 # Verify the setup
-./setup-multi-account-iam.sh verify my-config.yaml
+./scripts/setup-multi-account-iam.sh verify my-config.yaml
 
 # Teardown (removes all created resources)
-./setup-multi-account-iam.sh teardown my-config.yaml
+./scripts/setup-multi-account-iam.sh teardown my-config.yaml
 ```
 
 #### What the Script Does
@@ -303,27 +218,10 @@ Container Insights captures:
    kubectl logs -l app=aws-api-mcp-server
    ```
 
-2. Verify IRSA is working:
-   ```bash
-   kubectl exec -it deploy/aws-api-mcp-server -- aws sts get-caller-identity
-   ```
-
-### Permission Issues
-
-1. Check IAM role is attached:
-   ```bash
-   kubectl get sa aws-api-mcp-sa -o yaml
-   ```
-
-2. Verify IAM role has correct policies:
-   ```bash
-   aws iam list-attached-role-policies --role-name aws-api-mcp-role
-   ```
-
 ## Security Considerations
 
 - The MCP server has **read-only** access to AWS services
-- IRSA ensures pods use temporary credentials
+- Pods use temporary credentials
 - No AWS credentials are stored in the cluster
 - Access is scoped to specific service account
 
