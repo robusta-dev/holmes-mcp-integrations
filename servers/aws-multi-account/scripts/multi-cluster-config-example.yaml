@@ -20,7 +20,7 @@ clusters:
 # Kubernetes configuration (same across all clusters)
 kubernetes:
   namespace: default
-  service_account: multi-account-mcp-sa
+  service_account: aws-api-mcp-sa
 
 # IAM configuration
 iam:
