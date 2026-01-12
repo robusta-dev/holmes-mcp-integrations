@@ -18,7 +18,10 @@ import os
 import subprocess
 import logging
 import re
+import uuid
 from typing import Any, Dict, List, Optional
+import sys
+import uvicorn
 
 from fastmcp import FastMCP
 from dotenv import load_dotenv
@@ -64,7 +67,7 @@ mcp = FastMCP(
 )
 
 
-def validate_args(args: List[str]) -> List[str]:
+def validate_kubectl_args(args: List[str]) -> List[str]:
     """
     Validate kubectl arguments for security.
 
@@ -74,7 +77,6 @@ def validate_args(args: List[str]) -> List[str]:
     if not args:
         raise ValueError("No arguments provided")
 
-    # Strip 'kubectl' if it's the first argument
     if args[0] == "kubectl":
         args = args[1:]
 
@@ -108,31 +110,6 @@ def validate_args(args: List[str]) -> List[str]:
     return args
 
 
-def validate_pod_name(name: str) -> None:
-    """
-    Validate pod name according to Kubernetes naming conventions.
-
-    Must be alphanumeric with hyphens, cannot start with a hyphen.
-    """
-    if not name:
-        raise ValueError("Pod name cannot be empty")
-
-    if name.startswith("-"):
-        raise ValueError("Pod name cannot start with a hyphen")
-
-    if not all(c.isalnum() or c == "-" for c in name):
-        raise ValueError(
-            f"Invalid pod name '{name}': must contain only alphanumeric characters and hyphens"
-        )
-
-    # Additional Kubernetes naming constraints
-    if len(name) > 253:
-        raise ValueError("Pod name cannot exceed 253 characters")
-
-    if not re.match(r'^[a-z0-9]', name):
-        raise ValueError("Pod name must start with a lowercase letter or number")
-
-
 def validate_image(image: str) -> None:
     """
     Validate image is in the allowed list.
@@ -147,15 +124,6 @@ def validate_image(image: str) -> None:
             f"Image '{image}' not allowed. "
             f"Allowed images: {', '.join(sorted(ALLOWED_IMAGES))}"
         )
-
-
-def validate_command_args(command: List[str]) -> None:
-    """
-    Validate command arguments for shell metacharacters.
-    """
-    for arg in command:
-        if any(c in arg for c in SHELL_CHARS):
-            raise ValueError(f"Invalid characters in command argument: {arg}")
 
 
 def run_kubectl(args: List[str]) -> Dict[str, Any]:
@@ -218,7 +186,7 @@ def kubectl(args: List[str]) -> Dict[str, Any]:
         Dictionary with success status, stdout, stderr
     """
     try:
-        validated_args = validate_args(args)
+        validated_args = validate_kubectl_args(args)
         return run_kubectl(validated_args)
     except ValueError as e:
         logger.warning(f"Validation failed: {e}")
@@ -234,7 +202,6 @@ def kubectl(args: List[str]) -> Dict[str, Any]:
                 "to run containers by restricting images to an allowlist."
 )
 def run_image(
-    name: str,
     image: str,
     namespace: Optional[str] = None,
     command: Optional[List[str]] = None,
@@ -244,7 +211,6 @@ def run_image(
     Run a pod with a pre-approved image.
 
     Args:
-        name: Pod name (required)
         image: Image to run, must be in allowed list (required)
         namespace: Optional namespace
         command: Optional command to run in container
@@ -254,18 +220,14 @@ def run_image(
         Dictionary with success status, stdout, stderr
     """
     try:
-        # Validate inputs
-        validate_pod_name(name)
         validate_image(image)
+        image_base = image.split("/")[-1].split(":")[0].lower()
+        image_base = "".join(c if c.isalnum() else "-" for c in image_base)[:20]
+        name = f"k8s-remediation-{image_base}-{uuid.uuid4().hex[:8]}"
 
-        if command:
-            validate_command_args(command)
-
-        # Build kubectl run command
         kubectl_args = ["run", name, f"--image={image}", "--restart=Never"]
 
         if namespace:
-            # Validate namespace doesn't have shell chars
             if any(c in namespace for c in SHELL_CHARS):
                 raise ValueError(f"Invalid characters in namespace: {namespace}")
             kubectl_args.extend(["-n", namespace])
@@ -273,7 +235,6 @@ def run_image(
         if rm:
             kubectl_args.extend(["--rm", "-i"])
 
-        # Add command if provided
         if command:
             kubectl_args.append("--")
             kubectl_args.extend(command)
@@ -304,7 +265,7 @@ def run_image(
             "stderr": ""
         }
     except ValueError as e:
-        logger.warning(f"Validation failed for run_image: {e}")
+        logger.error(f"Validation failed for run_image: {e}")
         return {
             "success": False,
             "error": str(e)
@@ -340,8 +301,6 @@ def get_config() -> Dict[str, Any]:
 
 # Main entry point
 if __name__ == "__main__":
-    import sys
-    import uvicorn
 
     # Log configuration
     logger.info("Starting Kubernetes Remediation MCP Server")
