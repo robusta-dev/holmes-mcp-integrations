@@ -1,0 +1,11 @@
+# Requirements for Kubernetes Remediation MCP server
+# Minimal dependencies - just MCP functionality
+
+# MCP framework
+fastmcp[websockets]==2.12.1
+
+# Environment configuration
+python-dotenv==1.1.0
+
+# HTTP server for running in HTTP transport mode
+uvicorn==0.30.0
