@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: confluence-mcp
+  labels:
+    app: confluence-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: confluence-mcp
+  template:
+    metadata:
+      labels:
+        app: confluence-mcp
+    spec:
+      containers:
+      - name: mcp-server
+        image: ghcr.io/sooperset/mcp-atlassian:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        args:
+          - "--transport"
+          - "sse"
+          - "--port"
+          - "8000"
+          - "--host"
+          - "0.0.0.0"
+        env:
+        # Confluence Configuration (required)
+        - name: CONFLUENCE_URL
+          valueFrom:
+            secretKeyRef:
+              name: confluence-mcp-credentials
+              key: confluence-url
+        - name: CONFLUENCE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: confluence-mcp-credentials
+              key: confluence-username
+        - name: CONFLUENCE_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: confluence-mcp-credentials
+              key: confluence-api-token
+
+        # Optional: Jira Configuration (uncomment to enable Jira tools)
+        # - name: JIRA_URL
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: confluence-mcp-credentials
+        #       key: jira-url
+        # - name: JIRA_USERNAME
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: confluence-mcp-credentials
+        #       key: jira-username
+        # - name: JIRA_API_TOKEN
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: confluence-mcp-credentials
+        #       key: jira-api-token
+
+        # Tool Configuration (comma-separated list of tools to enable)
+        # If not set, all available tools are enabled
+        # Confluence tools: confluence_search, confluence_get_page, confluence_get_page_content,
+        #                   confluence_get_comments, confluence_create_page, confluence_update_page,
+        #                   confluence_delete_page
+        # Jira tools: jira_get_issue, jira_search, jira_get_project_issues, jira_create_issue,
+        #             jira_batch_create_issues, jira_update_issue, jira_delete_issue,
+        #             jira_get_transitions, jira_transition_issue, jira_add_worklog, jira_get_worklog,
+        #             jira_link_to_epic, jira_get_epic_issues, jira_add_comment, jira_download_attachment
+        - name: ENABLED_TOOLS
+          value: "confluence_search,confluence_get_page,confluence_get_page_content,confluence_get_comments"
+
+        # Read-only mode (set to true to disable write operations)
+        # - name: READ_ONLY
+        #   value: "true"
+
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        securityContext:
+          runAsNonRoot: true
+          readOnlyRootFilesystem: false
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL

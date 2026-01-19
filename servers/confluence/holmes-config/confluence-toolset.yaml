@@ -1,0 +1,33 @@
+mcp_servers:
+  confluence:
+    description: "Confluence documentation search and retrieval"
+    config:
+      url: "http://confluence-mcp.default.svc.cluster.local:8000/sse"
+      mode: sse
+      headers:
+        Content-Type: "application/json"
+    llm_instructions: |
+      Use the Confluence MCP to search and retrieve documentation from Confluence.
+
+      Available tools:
+      - confluence_search: Search for pages using CQL (Confluence Query Language)
+      - confluence_get_page: Get page details by ID
+      - confluence_get_page_content: Get the full content of a page
+      - confluence_get_comments: Get comments on a page
+
+      Search tips:
+      - Use CQL syntax: text ~ "search term" to search content
+      - Filter by space: space = "MYSPACE"
+      - Filter by type: type = "page"
+      - Combine filters: space = "DOCS" AND text ~ "kubernetes"
+
+      Example CQL queries:
+      - text ~ "deployment guide"
+      - space = "ENGINEERING" AND text ~ "architecture"
+      - title ~ "runbook*"
+      - creator = "user@company.com" AND created >= "2024-01-01"
+
+      When investigating issues:
+      1. Search for relevant documentation using confluence_search
+      2. Get the full page content with confluence_get_page_content
+      3. Check comments for additional context with confluence_get_comments
