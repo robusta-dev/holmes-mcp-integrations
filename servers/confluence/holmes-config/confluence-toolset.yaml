@@ -1,0 +1,8 @@
+mcp_servers:
+  confluence:
+    description: "Confluence documentation search and retrieval"
+    config:
+      url: "http://confluence-mcp.default.svc.cluster.local:8000/sse"
+      mode: sse
+      headers:
+        Content-Type: "application/json"
