@@ -15,8 +15,12 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_teardown() { echo -e "${MAGENTA}[TEARDOWN]${NC} $1"; }
 
 usage() {
-    echo "Usage: $0 <setup|teardown|verify> [config-file] [permissions-file]"
-    echo "Commands: setup, teardown, verify"
+    echo "Usage: $0 <setup|teardown|verify|generate-config> [config-file] [permissions-file]"
+    echo "Commands:"
+    echo "  setup           - Set up IAM roles and OIDC providers in target accounts"
+    echo "  teardown        - Remove IAM roles (OIDC teardown requires TEARDOWN_OIDC=true)"
+    echo "  verify          - Verify IAM roles and OIDC providers exist"
+    echo "  generate-config - Generate holmes_config.yaml from config file"
     echo "Default config-file: multi-cluster-config.yaml"
     echo "Default permissions-file: aws-mcp-iam-policy.json"
     echo ""
@@ -63,9 +67,71 @@ load_config() {
     SESSION_DURATION=$(yq eval '.iam.session_duration' "$CONFIG_FILE")
     CLUSTER_COUNT=$(yq eval '.clusters | length' "$CONFIG_FILE")
     ACCOUNT_COUNT=$(yq eval '.target_accounts | length' "$CONFIG_FILE")
+    # Get default region from first cluster
+    DEFAULT_REGION=$(yq eval '.clusters[0].region' "$CONFIG_FILE" 2>/dev/null || echo "us-east-2")
     
     log_success "Loaded: $CLUSTER_COUNT clusters, $ACCOUNT_COUNT accounts"
     log_info "Using permissions file: $PERMISSIONS_FILE"
+}
+
+generate_holmes_config() {
+    local output_file="${1:-holmes_config.yaml}"
+    
+    log_info "Generating Holmes config: $output_file"
+    
+    # Generate YAML content
+    cat > "$output_file" <<EOF
+holmes:
+  mcpAddons:
+    aws:
+      config:
+        readOnlyMode: true
+        region: ${DEFAULT_REGION}
+      enabled: true
+      multiAccount:
+        enabled: true
+        llm_account_descriptions: |
+          You must use the --profile flag to specify the account to use.
+EOF
+    
+    # Add LLM account descriptions
+    local i=0
+    while [ $i -lt $ACCOUNT_COUNT ]; do
+        local profile=$(yq e ".target_accounts[$i].profile" "$CONFIG_FILE")
+        local desc=$(yq e ".target_accounts[$i].description" "$CONFIG_FILE")
+        cat >> "$output_file" <<EOF
+          Example: --profile ${profile} - ${desc}
+EOF
+        i=$((i+1))
+    done
+    
+    # Add profiles section
+    cat >> "$output_file" <<EOF
+        profiles:
+EOF
+    
+    # Add profiles
+    i=0
+    while [ $i -lt $ACCOUNT_COUNT ]; do
+        local profile=$(yq e ".target_accounts[$i].profile" "$CONFIG_FILE")
+        local account_id=$(yq e ".target_accounts[$i].account_id" "$CONFIG_FILE")
+        local role_arn="arn:aws:iam::${account_id}:role/${IAM_ROLE_NAME}"
+        
+        cat >> "$output_file" <<EOF
+          ${profile}:
+            account_id: "${account_id}"
+            role_arn: ${role_arn}
+EOF
+        i=$((i+1))
+    done
+    
+    # Add service account config
+    cat >> "$output_file" <<EOF
+      serviceAccount:
+        create: true
+EOF
+    
+    log_success "Generated Holmes config: $output_file"
 }
 
 create_trust_policy() {
@@ -265,13 +331,16 @@ process_account() {
         verify)
             verify_account "$prof" "$acct"
             ;;
+        generate-config)
+            # This action doesn't process accounts, handled in main()
+            ;;
     esac
     
     log_success "Done: $prof"
 }
 
 main() {
-    [ "$ACTION" != "setup" ] && [ "$ACTION" != "teardown" ] && [ "$ACTION" != "verify" ] && usage
+    [ "$ACTION" != "setup" ] && [ "$ACTION" != "teardown" ] && [ "$ACTION" != "verify" ] && [ "$ACTION" != "generate-config" ] && usage
     
     echo "=========================================="
     log_info "Multi-Cluster IAM: $ACTION"
@@ -280,6 +349,13 @@ main() {
     check_dependencies
     check_files
     load_config
+    
+    # Handle generate-config separately (doesn't need account processing)
+    if [ "$ACTION" = "generate-config" ]; then
+        generate_holmes_config
+        log_success "All done!"
+        return 0
+    fi
     
     local i=0 success=0
     
@@ -299,6 +375,12 @@ main() {
     echo "=========================================="
     log_success "Successful: $success/$ACCOUNT_COUNT"
     echo "=========================================="
+    
+    # Generate config after successful setup
+    if [ "$ACTION" = "setup" ] && [ $success -eq $ACCOUNT_COUNT ]; then
+        echo ""
+        generate_holmes_config
+    fi
     
     [ $success -eq $ACCOUNT_COUNT ] && log_success "All done!" || exit 1
 }
