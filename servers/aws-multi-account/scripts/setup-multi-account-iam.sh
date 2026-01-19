@@ -19,6 +19,9 @@ usage() {
     echo "Commands: setup, teardown, verify"
     echo "Default config-file: multi-cluster-config.yaml"
     echo "Default permissions-file: aws-mcp-iam-policy.json"
+    echo ""
+    echo "Note: OIDC provider teardown is skipped by default to prevent accidental deletion."
+    echo "      To enable OIDC teardown, set: TEARDOWN_OIDC=true"
     exit 1
 }
 
@@ -102,7 +105,8 @@ setup_oidc() {
         local name=$(yq e ".clusters[$i].name" "$CONFIG_FILE")
         local region=$(yq e ".clusters[$i].region" "$CONFIG_FILE")
         local issuer=$(yq e ".clusters[$i].oidc_issuer_id" "$CONFIG_FILE")
-        local url=$(yq e ".clusters[$i].oidc_issuer_url" "$CONFIG_FILE")
+        # Construct OIDC issuer URL from region and issuer ID (format: https://oidc.eks.{region}.amazonaws.com/id/{issuer_id})
+        local url="https://oidc.eks.${region}.amazonaws.com/id/${issuer}"
         local arn="arn:aws:iam::${acct}:oidc-provider/oidc.eks.${region}.amazonaws.com/id/${issuer}"
         
         log_info "  $name"
@@ -251,7 +255,12 @@ process_account() {
             ;;
         teardown)
             teardown_role "$prof"
-            teardown_oidc "$prof" "$acct"
+            # Only teardown OIDC if explicitly enabled (OIDC providers may be shared resources)
+            if [ "${TEARDOWN_OIDC:-false}" = "true" ]; then
+                teardown_oidc "$prof" "$acct"
+            else
+                log_warning "Skipping OIDC provider teardown (set TEARDOWN_OIDC=true to enable)"
+            fi
             ;;
         verify)
             verify_account "$prof" "$acct"

@@ -71,13 +71,11 @@ clusters:
     region: us-east-1
     account_id: "1111111111"
     oidc_issuer_id: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-    oidc_issuer_url: https://oidc.eks.us-east-1.amazonaws.com/id/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
   - name: staging-cluster
     region: us-west-2
     account_id: "1111111111"
     oidc_issuer_id: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-    oidc_issuer_url: https://oidc.eks.us-west-2.amazonaws.com/id/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 
 kubernetes:
   namespace: default
