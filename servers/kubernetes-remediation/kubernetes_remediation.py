@@ -55,7 +55,9 @@ ALLOWED_IMAGES = set(
 )
 
 # Shell metacharacters to reject (defense in depth)
-SHELL_CHARS = set(";|&$`\\'\"\n\r")
+# Note: double quotes (") are allowed because they're required for JSON payloads
+# (e.g., kubectl patch -p '{"spec":{"replicas":3}}') and shell=False makes them safe
+SHELL_CHARS = set(";|&$`\\'\n\r")
 
 # Characters that could be used for flag injection
 FLAG_INJECTION_CHARS = set("=")

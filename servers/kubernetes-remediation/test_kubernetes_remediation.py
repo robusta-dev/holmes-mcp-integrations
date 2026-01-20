@@ -174,7 +174,7 @@ class TestShellCharacterRejection:
         ("`", "backtick"),
         ("\\", "backslash"),
         ("'", "single quote"),
-        ('"', "double quote"),
+        # Note: double quote (") is allowed for JSON payloads
         ("\n", "newline"),
         ("\r", "carriage return"),
     ])
@@ -184,51 +184,53 @@ class TestShellCharacterRejection:
             kr.validate_kubectl_args(["get", f"pods{char}evil"])
 
 
-class TestJSONPayloadIssue:
+class TestJSONPayloads:
     """
-    Tests documenting the JSON payload issue.
+    Tests for JSON payload support.
 
-    KNOWN BUG: The current implementation blocks double quotes (") as shell
-    metacharacters, which prevents JSON payloads from being used with
-    commands like 'patch'. This needs to be fixed in the implementation.
-
-    Since kubectl is invoked with shell=False, blocking double quotes is
-    actually unnecessary - the shell metacharacter check is overly aggressive.
+    Double quotes (") are allowed because they're required for JSON payloads
+    and shell=False makes them safe from injection.
     """
 
-    def test_patch_with_json_currently_fails(self):
-        """
-        KNOWN BUG: patch with JSON payload fails due to double quote blocking.
+    def test_patch_with_json_works(self):
+        """patch with JSON payload should work"""
+        result = kr.validate_kubectl_args([
+            "patch", "deployment", "my-app",
+            "-p", '{"spec":{"replicas":3}}'
+        ])
+        assert result[0] == "patch"
+        assert '{"spec":{"replicas":3}}' in result
 
-        This test documents the current (broken) behavior. Once fixed,
-        this test should be updated to expect success.
-        """
-        # Currently this fails because " is in SHELL_CHARS
-        with pytest.raises(ValueError, match="Invalid characters"):
-            kr.validate_kubectl_args([
-                "patch", "deployment", "my-app",
-                "-p", '{"spec":{"replicas":3}}'
-            ])
-
-    def test_jsonpath_output_currently_fails(self):
-        """
-        KNOWN BUG: jsonpath output fails due to curly brace not being the issue,
-        but if the jsonpath contains quotes it would fail.
-        """
-        # This actually works since it doesn't have quotes
+    def test_jsonpath_output_works(self):
+        """jsonpath output should work"""
         result = kr.validate_kubectl_args([
             "get", "pod", "my-pod",
             "-o", "jsonpath={.status.phase}"
         ])
         assert result[0] == "get"
 
-    def test_label_selector_with_quotes_fails(self):
-        """
-        KNOWN BUG: Any argument with quotes fails.
-        """
-        # This would fail if Holmes tried to use quoted strings
-        with pytest.raises(ValueError, match="Invalid characters"):
-            kr.validate_kubectl_args(["get", "pods", "-l", 'app="nginx"'])
+    def test_label_selector_with_quotes_works(self):
+        """Label selectors with quotes should work"""
+        result = kr.validate_kubectl_args(["get", "pods", "-l", 'app="nginx"'])
+        assert result[0] == "get"
+
+    def test_patch_strategic_merge(self):
+        """Strategic merge patch with JSON should work"""
+        result = kr.validate_kubectl_args([
+            "patch", "deployment", "my-app",
+            "--type=strategic",
+            "-p", '{"spec":{"template":{"spec":{"containers":[{"name":"app","image":"nginx:1.19"}]}}}}'
+        ])
+        assert result[0] == "patch"
+
+    def test_patch_json_patch_type(self):
+        """JSON patch type should work"""
+        result = kr.validate_kubectl_args([
+            "patch", "deployment", "my-app",
+            "--type=json",
+            "-p", '[{"op":"replace","path":"/spec/replicas","value":3}]'
+        ])
+        assert result[0] == "patch"
 
 
 class TestKubectlCommandExamples:
