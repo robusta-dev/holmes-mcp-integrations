@@ -17,7 +17,7 @@ spec:
       serviceAccountName: kubernetes-remediation-mcp-sa
       containers:
       - name: mcp-server
-        image: me-west1-docker.pkg.dev/robusta-development/development/kubernetes-remediation:1.0.2
+        image: me-west1-docker.pkg.dev/robusta-development/development/kubernetes-remediation:1.0.3
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
