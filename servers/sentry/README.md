@@ -25,6 +25,27 @@ The official Sentry MCP uses STDIO transport, so we wrap it with [Supergateway](
 
 ## Quick Start
 
+### Creating an Auth Token
+
+You have two options for authentication:
+
+#### User Auth Token (for development/testing)
+
+1. Go to Sentry → Settings → Account → API → Auth Tokens
+2. Click "Create New Token"
+3. Grant the following scopes:
+   - `org:read`
+   - `member:read`
+   - `alerts:read`
+   - `project:read`
+   - `event:read`
+   - `issue:read` 
+   - `team:read`
+4. Copy the generated token
+
+
+#### Deploy the Sentry MCP server
+
 ```bash
 # 1. Create the secret with your Sentry credentials
 # Edit secret.yaml with your actual token first
@@ -38,29 +59,6 @@ kubectl apply -f service.yaml
 kubectl get pods -l app=sentry-mcp
 kubectl logs -l app=sentry-mcp
 ```
-
-## Prerequisites
-
-1. **Sentry Account** (SaaS or self-hosted)
-2. **Auth Token** - See [Creating an Auth Token](#creating-an-auth-token)
-3. **Kubernetes Cluster** with kubectl configured
-
-### Creating an Auth Token
-
-You have two options for authentication:
-
-#### User Auth Token (for development/testing)
-
-1. Go to Sentry → Settings → Account → API → Auth Tokens
-2. Click "Create New Token"
-3. Grant the following scopes:
-   - `org:read`
-   - `project:read`
-   - `event:read`
-   - `issue:read` (optional, for issue management)
-   - `issue:write` (optional, for resolving/assigning issues)
-4. Copy the generated token
-
 
 ## Holmes Integration
 
