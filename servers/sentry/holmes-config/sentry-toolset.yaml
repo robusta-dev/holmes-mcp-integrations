@@ -1,0 +1,19 @@
+# Holmes configuration for Sentry MCP integration
+# Add this to your Holmes configuration to enable Sentry error tracking tools
+#
+# Available tools from Sentry MCP:
+#   - get_sentry_issue: Get details about a specific Sentry issue
+#   - search_sentry_issues: Search for issues in a Sentry project
+#   - get_sentry_event: Get details about a specific error event
+#   - list_sentry_projects: List all projects in your Sentry organization
+#   - resolve_sentry_issue: Mark an issue as resolved
+#   - assign_sentry_issue: Assign an issue to a team member
+
+mcp_servers:
+  sentry:
+    description: "Sentry error tracking and monitoring"
+    config:
+      url: "http://sentry-mcp.default.svc.cluster.local:8000/sse"
+      mode: sse
+      headers:
+        Content-Type: "application/json"
