@@ -26,14 +26,7 @@ The official Sentry MCP uses STDIO transport, so we wrap it with [Supergateway](
 ## Quick Start
 
 ```bash
-# 1. Build the Docker image
-docker build -t your-registry/sentry-mcp:latest .
-docker push your-registry/sentry-mcp:latest
-
-# 2. Update deployment.yaml with your image
-# Edit deployment.yaml and set the image field
-
-# 3. Create the secret with your Sentry credentials
+# 1. Create the secret with your Sentry credentials
 # Edit secret.yaml with your actual token first
 kubectl apply -f secret.yaml
 
@@ -56,7 +49,7 @@ kubectl logs -l app=sentry-mcp
 
 You have two options for authentication:
 
-#### Option 1: User Auth Token (for development/testing)
+#### User Auth Token (for development/testing)
 
 1. Go to Sentry → Settings → Account → API → Auth Tokens
 2. Click "Create New Token"
@@ -68,15 +61,24 @@ You have two options for authentication:
    - `issue:write` (optional, for resolving/assigning issues)
 4. Copy the generated token
 
-#### Option 2: Internal Integration (recommended for production)
 
-1. Go to Sentry → Settings → Developer Settings → Internal Integrations
-2. Click "Create New Internal Integration"
-3. Configure permissions:
-   - **Organization**: Read
-   - **Project**: Read
-   - **Issue & Event**: Read (or Admin if you need write access)
-4. Copy the token from the integration
+## Holmes Integration
+
+Add the MCP server to your Holmes helm values:
+
+```yaml
+  mcp_servers:
+    sentry:
+      description: "Sentry error tracking and issue management"
+      config:
+        url: "http://sentry-mcp.default.svc.cluster.local:8000/sse"
+        mode: sse
+        headers:
+          Content-Type: "application/json"
+      llm_instructions: "Use Sentry tools to investigate application errors, get issue details, and analyze root causes with Holmes. When investigating sentry alert, try understanding the cause. The to find the relevant github repo, using the github mcp integration, or any other way. Try to find when the problematic code was created, by who."
+```
+
+**Note:** Update the namespace in the URL if deploying to a different namespace (e.g., `sentry-mcp.sentry.svc.cluster.local`).
 
 ## Tools
 
@@ -102,90 +104,6 @@ The Sentry MCP provides these tools:
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `SENTRY_AUTH_TOKEN` | Sentry authentication token | Yes |
-| `SENTRY_HOST` | Hostname for self-hosted Sentry (e.g., `sentry.example.com`) | No |
-
-### Self-Hosted Sentry
-
-For self-hosted Sentry installations:
-
-1. Uncomment the `sentry-host` field in `secret.yaml` and set your hostname
-2. Uncomment the `SENTRY_HOST` environment variable in `deployment.yaml`
-3. Update the Dockerfile CMD to include the host flag (see below)
-
-Update the Dockerfile CMD for self-hosted:
-```dockerfile
-CMD ["--port", "8000", "--stdio", "sh -c 'sentry-mcp --access-token=$SENTRY_AUTH_TOKEN --host=$SENTRY_HOST'"]
-```
-
-## Deployment
-
-### 1. Build the Docker Image
-
-```bash
-docker build -t your-registry/sentry-mcp:latest .
-docker push your-registry/sentry-mcp:latest
-```
-
-### 2. Create the Secret
-
-Edit `secret.yaml` with your actual token:
-
-```yaml
-stringData:
-  sentry-auth-token: "sntryu_your-actual-token-here"
-```
-
-Apply the secret:
-```bash
-kubectl apply -f secret.yaml
-```
-
-### 3. Update and Deploy
-
-Edit `deployment.yaml` to set your image:
-```yaml
-image: your-registry/sentry-mcp:latest
-```
-
-Deploy:
-```bash
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
-```
-
-### 4. Verify
-
-```bash
-# Check pod status
-kubectl get pods -l app=sentry-mcp
-
-# Check logs
-kubectl logs -l app=sentry-mcp
-
-# Test connectivity (should see SSE connection established)
-kubectl run curl --image=curlimages/curl --rm -it --restart=Never -- \
-  curl -s http://sentry-mcp:8000/health
-```
-
-## Holmes Integration
-
-Add the MCP server to your Holmes configuration:
-
-```yaml
-  mcp_servers:
-    sentry:
-      description: "Sentry error tracking and issue management"
-      config:
-        url: "http://sentry-mcp.default.svc.cluster.local:8000/sse"
-        mode: sse
-        headers:
-          Content-Type: "application/json"
-      llm_instructions: "Use Sentry tools to investigate application errors, get issue details, and analyze root causes with Holmes. When investigating sentry alert, try understanding the cause. The to find the relevant github repo, using the github mcp integration, or any other way. Try to find when the problematic code was created, by who."
-```
-
-See `holmes-config/sentry-toolset.yaml` for a complete example.
-
-**Note:** Update the namespace in the URL if deploying to a different namespace (e.g., `sentry-mcp.sentry.svc.cluster.local`).
 
 ## Security Considerations
 
