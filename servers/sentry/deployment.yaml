@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentry-mcp
+  labels:
+    app: sentry-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sentry-mcp
+  template:
+    metadata:
+      labels:
+        app: sentry-mcp
+    spec:
+      containers:
+      - name: mcp-server
+        image: me-west1-docker.pkg.dev/robusta-development/development/sentry-mcp:1.0.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        # Required: Sentry authentication token
+        - name: SENTRY_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sentry-mcp-credentials
+              key: sentry-auth-token
+
+        # Optional: For self-hosted Sentry installations
+        # Uncomment the following block if using self-hosted Sentry
+        # - name: SENTRY_HOST
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: sentry-mcp-credentials
+        #       key: sentry-host
+
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        livenessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: false
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
