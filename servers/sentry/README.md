@@ -172,14 +172,15 @@ kubectl run curl --image=curlimages/curl --rm -it --restart=Never -- \
 Add the MCP server to your Holmes configuration:
 
 ```yaml
-mcp_servers:
-  sentry:
-    description: "Sentry error tracking and monitoring"
-    config:
-      url: "http://sentry-mcp.default.svc.cluster.local:8000/sse"
-      mode: sse
-      headers:
-        Content-Type: "application/json"
+  mcp_servers:
+    sentry:
+      description: "Sentry error tracking and issue management"
+      config:
+        url: "http://sentry-mcp.default.svc.cluster.local:8000/sse"
+        mode: sse
+        headers:
+          Content-Type: "application/json"
+      llm_instructions: "Use Sentry tools to investigate application errors, get issue details, and analyze root causes with Holmes. When investigating sentry alert, try understanding the cause. The to find the relevant github repo, using the github mcp integration, or any other way. Try to find when the problematic code was created, by who."
 ```
 
 See `holmes-config/sentry-toolset.yaml` for a complete example.

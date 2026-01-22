@@ -16,8 +16,7 @@ spec:
     spec:
       containers:
       - name: mcp-server
-        # Replace with your built image
-        image: your-registry/sentry-mcp:latest
+        image: me-west1-docker.pkg.dev/robusta-development/development/sentry-mcp:1.0.0
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
