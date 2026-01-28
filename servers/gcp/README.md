@@ -182,6 +182,84 @@ kubectl create secret generic gcp-sa-key \
   --namespace=holmes
 ```
 
+## Workload Identity Setup (Recommended for GKE)
+
+Workload Identity is the recommended way to authenticate GCP workloads running on GKE. It eliminates the need for service account keys and provides better security.
+
+#### Step 1: Enable Workload Identity on Your Cluster
+
+```bash
+gcloud container clusters update CLUSTER_NAME \
+  --project PROJECT_ID \
+  --workload-pool=PROJECT_ID.svc.id.goog \
+  --region REGION
+```
+
+#### Step 2: Enable Workload Identity on Node Pools
+
+Each node pool that runs workloads using Workload Identity needs to have GKE metadata server enabled:
+
+```bash
+gcloud container node-pools update NODE_POOL_NAME \
+  --project PROJECT_ID \
+  --cluster CLUSTER_NAME \
+  --workload-metadata=GKE_METADATA \
+  --region REGION
+```
+
+Repeat for all node pools where Holmes pods may run.
+
+#### Step 3: Create GCP Service Account (GSA)
+
+Follow steps 1 and 2 to [create a GSA](#manual-setup-alternative).
+
+#### Step 4: Bind Kubernetes Service Account to GCP Service Account
+
+Allow the Kubernetes Service Account (KSA) to impersonate the GCP Service Account (GSA):
+
+The GCP_SERVICE_ACCOUNT_EMAIL can be found in the [GCP console](https://console.cloud.google.com/iam-admin/serviceaccounts?)
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding GCP_SERVICE_ACCOUNT_EMAIL \
+  --project PROJECT_ID \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:PROJECT_ID.svc.id.goog[NAMESPACE/gcp-mcp-sa]"
+```
+
+Replace:
+- `GCP_SERVICE_ACCOUNT_EMAIL` - Your GCP service account email
+- `PROJECT_ID` - Your GCP project ID
+- `NAMESPACE` - The Kubernetes namespace where Holmes will be deployed (e.g., `default`)
+
+
+#### Step 5: Configure Holmes Helm Values for Workload Identity
+
+Add the kubernetes service account annotation to your `values.yaml`:
+
+```yaml
+mcpAddons:
+  gcp:
+    enabled: true
+
+    # Workload Identity configuration
+    serviceAccount:
+      annotations:
+        iam.gke.io/gcp-service-account: "GCP_SERVICE_ACCOUNT_EMAIL"
+
+    # Optional: specify primary project/region
+    config:
+      project: "your-primary-project"  # Optional
+      region: "us-central1"            # Optional
+
+    # Enable the MCP servers you need
+    gcloud:
+      enabled: true
+    observability:
+      enabled: true
+    storage:
+      enabled: true
+```
+
 ## Troubleshooting
 
 ### Common Issues
