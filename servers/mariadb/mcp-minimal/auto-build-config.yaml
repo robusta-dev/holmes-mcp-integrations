@@ -1,0 +1,2 @@
+image: mariadb-http-mcp-minimal
+version: "1.0.6"
