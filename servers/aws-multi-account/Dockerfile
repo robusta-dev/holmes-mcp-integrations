@@ -1,4 +1,4 @@
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
 
 USER root
 

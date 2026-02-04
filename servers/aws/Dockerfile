@@ -1,7 +1,7 @@
 # AWS API MCP Server with Supergateway
 # Uses Supergateway base image and adds Python
 
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
 
 # Switch to root to install Python
 USER root

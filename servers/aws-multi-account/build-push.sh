@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REGISTRY="us-central1-docker.pkg.dev/genuine-flight-317411/devel"
+REGISTRY="us-central1-docker.pkg.dev/genuine-flight-317411/mcp"
 
 image=$(grep '^image:' "$SCRIPT_DIR/auto-build-config.yaml" | sed 's/image: *//')
 version=$(grep '^version:' "$SCRIPT_DIR/auto-build-config.yaml" | sed 's/version: *//' | tr -d '"')

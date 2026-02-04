@@ -1,5 +1,12 @@
 #!/bin/bash
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REGISTRY="us-central1-docker.pkg.dev/genuine-flight-317411/mcp"
+
+image=$(grep '^image:' "$SCRIPT_DIR/auto-build-config.yaml" | sed 's/image: *//')
+version=$(grep '^version:' "$SCRIPT_DIR/auto-build-config.yaml" | sed 's/version: *//' | tr -d '"')
+
 docker buildx build --pull --no-cache --build-arg BUILDKIT_INLINE_CACHE=1 --platform linux/amd64,linux/arm64 \
-    --tag us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:0.1.0 \
-    --tag us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest \
+    --tag "$REGISTRY/$image:$version" \
+    --tag "$REGISTRY/$image:latest" \
     --push .

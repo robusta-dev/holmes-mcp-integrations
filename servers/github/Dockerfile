@@ -1,4 +1,4 @@
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
 
 # Copy GitHub MCP server binary from official image
 COPY --from=ghcr.io/github/github-mcp-server:latest /server/github-mcp-server /usr/local/bin/

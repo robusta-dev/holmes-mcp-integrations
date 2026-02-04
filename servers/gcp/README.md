@@ -311,9 +311,9 @@ Note: gcloud CLI doesn't support Workload Identity token refresh, so service acc
 ## Docker Images
 
 Pre-built images are available:
-- `us-central1-docker.pkg.dev/genuine-flight-317411/holmesgpt/gcloud-cli-mcp:1.2.0`
-- `us-central1-docker.pkg.dev/genuine-flight-317411/holmesgpt/gcloud-observability-mcp:1.0.0`
-- `us-central1-docker.pkg.dev/genuine-flight-317411/holmesgpt/gcloud-storage-mcp:1.0.0`
+- `us-central1-docker.pkg.dev/genuine-flight-317411/mcp/gcloud-cli-mcp:1.0.9`
+- `us-central1-docker.pkg.dev/genuine-flight-317411/mcp/gcloud-observability-mcp:1.0.1`
+- `us-central1-docker.pkg.dev/genuine-flight-317411/mcp/gcloud-storage-mcp:1.0.1`
 
 To build custom images:
 ```bash

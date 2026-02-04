@@ -54,11 +54,16 @@ Use the `build-all-mcp-servers.sh` script to build and push all MCP server image
 ```
 
 The script will:
+- **Build the base image first** (`mcp_base_image/supergateway_base`)
 - Auto-discover all servers with `auto-build-config.yaml`
 - Check if each image already exists in the registry
 - Skip existing images (unless `--force` is used)
 - Build multi-platform images (linux/amd64, linux/arm64)
 - Push to the configured registry
+
+### Base Image
+
+The base image (`supergateway_base`) is built first and tagged with both version and `:latest`. All MCP servers depend on this base image. Its config is in `mcp_base_image/auto-build-config.yaml`.
 
 ### Build Single Server
 
@@ -92,7 +97,7 @@ To release a new version of an MCP server:
 
 All images are pushed to:
 ```
-us-central1-docker.pkg.dev/genuine-flight-317411/devel/
+us-central1-docker.pkg.dev/genuine-flight-317411/mcp/
 ```
 
 ## Adding a New MCP Server
@@ -104,7 +109,7 @@ us-central1-docker.pkg.dev/genuine-flight-317411/devel/
 
 2. Add a `Dockerfile`:
    ```dockerfile
-   FROM us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest
+   FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
    # ... your server setup
    ```
 
@@ -119,7 +124,7 @@ us-central1-docker.pkg.dev/genuine-flight-317411/devel/
    #!/bin/bash
    set -e
    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-   REGISTRY="us-central1-docker.pkg.dev/genuine-flight-317411/devel"
+   REGISTRY="us-central1-docker.pkg.dev/genuine-flight-317411/mcp"
 
    image=$(grep '^image:' "$SCRIPT_DIR/auto-build-config.yaml" | sed 's/image: *//')
    version=$(grep '^version:' "$SCRIPT_DIR/auto-build-config.yaml" | sed 's/version: *//' | tr -d '"')

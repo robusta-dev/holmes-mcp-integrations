@@ -1,7 +1,7 @@
 # Sentry MCP Server with Supergateway
 # Wraps the Sentry MCP stdio server and exposes it as SSE HTTP API
 
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
 
 # Switch to root to install dependencies
 USER root

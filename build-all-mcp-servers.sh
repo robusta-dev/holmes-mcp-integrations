@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Build and push all MCP servers to the new registry
-# Registry: us-central1-docker.pkg.dev/genuine-flight-317411/devel/
+# Registry: us-central1-docker.pkg.dev/genuine-flight-317411/mcp/
 #
 # Each server directory must have an auto-build-config.yaml with:
 #   image: <image-name>
@@ -15,7 +15,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REGISTRY="us-central1-docker.pkg.dev/genuine-flight-317411/devel"
+REGISTRY="us-central1-docker.pkg.dev/genuine-flight-317411/mcp"
+BASE_IMAGE_DIR="mcp_base_image"
 SERVERS_BASE_DIR="servers"
 
 # Options
@@ -120,6 +121,7 @@ image_exists() {
 #   $1 - directory containing Dockerfile
 #   $2 - image name
 #   $3 - version/tag
+#   $4 - (optional) also tag as :latest
 # Returns:
 #   0 on success, 1 on failure
 #######################################
@@ -127,19 +129,101 @@ build_and_push() {
     local dir="$1"
     local image="$2"
     local version="$3"
+    local tag_latest="${4:-false}"
     local full_image="$REGISTRY/$image:$version"
 
     cd "$dir"
 
-    docker buildx build \
-        --pull \
-        --no-cache \
-        --build-arg BUILDKIT_INLINE_CACHE=1 \
-        --platform linux/arm64,linux/amd64 \
-        --tag "$full_image" \
-        --push .
+    if [[ "$tag_latest" == "true" ]]; then
+        docker buildx build \
+            --pull \
+            --no-cache \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --platform linux/arm64,linux/amd64 \
+            --tag "$full_image" \
+            --tag "$REGISTRY/$image:latest" \
+            --push .
+    else
+        docker buildx build \
+            --pull \
+            --no-cache \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --platform linux/arm64,linux/amd64 \
+            --tag "$full_image" \
+            --push .
+    fi
 
     return $?
+}
+
+#######################################
+# Process base image in dry-run mode
+#######################################
+process_base_image_dry_run() {
+    local dir="$SCRIPT_DIR/$BASE_IMAGE_DIR"
+    local config_file="$dir/auto-build-config.yaml"
+
+    if ! parse_config "$config_file"; then
+        return 1
+    fi
+
+    local full_image="$REGISTRY/$IMAGE:$VERSION"
+
+    printf "%-40s %-35s " "$BASE_IMAGE_DIR" "$IMAGE:$VERSION"
+
+    if image_exists "$IMAGE" "$VERSION"; then
+        echo "[EXISTS]"
+        SKIPPED_IMAGES+=("$full_image")
+    else
+        echo "[PENDING]"
+        PENDING_IMAGES+=("$full_image")
+    fi
+
+    return 0
+}
+
+#######################################
+# Process base image (build)
+#######################################
+process_base_image() {
+    local dir="$SCRIPT_DIR/$BASE_IMAGE_DIR"
+    local config_file="$dir/auto-build-config.yaml"
+
+    if ! parse_config "$config_file"; then
+        return 1
+    fi
+
+    local full_image="$REGISTRY/$IMAGE:$VERSION"
+
+    echo "=========================================="
+    echo "Building Base Image"
+    echo "=========================================="
+    echo "Directory: $BASE_IMAGE_DIR"
+    echo "Image:     $IMAGE:$VERSION (+ :latest)"
+    echo "----------------------------------------"
+
+    if [[ "$FORCE_BUILD" != true ]] && image_exists "$IMAGE" "$VERSION"; then
+        echo "SKIPPED: Base image already exists in registry"
+        SKIPPED_IMAGES+=("$full_image")
+        echo ""
+        return 0
+    fi
+
+    if [[ "$FORCE_BUILD" == true ]] && image_exists "$IMAGE" "$VERSION"; then
+        echo "FORCE: Rebuilding existing base image..."
+    fi
+
+    echo "Building and pushing (with :latest tag)..."
+    if build_and_push "$dir" "$IMAGE" "$VERSION" "true"; then
+        echo "SUCCESS: Built and pushed $full_image"
+        BUILT_IMAGES+=("$full_image")
+    else
+        echo "FAILED: Could not build base image"
+        return 1
+    fi
+
+    echo ""
+    return 0
 }
 
 #######################################
@@ -314,19 +398,32 @@ main() {
         exit 1
     fi
 
-    echo "Found ${#server_dirs[@]} server(s)"
+    echo "Found 1 base image + ${#server_dirs[@]} server(s)"
     echo ""
 
     if [[ "$DRY_RUN" == true ]]; then
         printf "%-40s %-35s %s\n" "DIRECTORY" "IMAGE:VERSION" "STATUS"
         printf "%-40s %-35s %s\n" "---------" "-------------" "------"
 
+        # Check base image first
+        process_base_image_dry_run
+
+        # Then check all servers
         for dir in "${server_dirs[@]}"; do
             process_server_dry_run "$dir"
         done
 
         print_dry_run_summary
     else
+        # Build base image first
+        process_base_image
+
+        echo "=========================================="
+        echo "Building MCP Servers"
+        echo "=========================================="
+        echo ""
+
+        # Then build all servers
         for dir in "${server_dirs[@]}"; do
             process_server "$dir"
         done
