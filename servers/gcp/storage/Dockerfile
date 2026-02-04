@@ -1,13 +1,10 @@
 # Google Cloud Storage MCP Server with Supergateway
 # Uses Supergateway base image to convert STDIO MCP to HTTP/SSE API
 
-FROM supercorp/supergateway:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest
 
 # Switch to root to install dependencies
 USER root
-
-# Update npm to latest version for security
-RUN npm install -g npm@latest
 
 # Install minimal dependencies for storage-mcp
 RUN apk add --no-cache \

@@ -1,7 +1,7 @@
-FROM supercorp/supergateway:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest
 
 USER root
-RUN npm install -g npm@latest
+
 RUN apk add --no-cache python3 py3-pip
 
 RUN pip3 install --no-cache-dir --break-system-packages \

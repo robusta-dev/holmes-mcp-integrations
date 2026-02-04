@@ -1,13 +1,10 @@
 # AWS API MCP Server with Supergateway
 # Uses Supergateway base image and adds Python
 
-FROM supercorp/supergateway:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/devel/supergateway_base:latest
 
 # Switch to root to install Python
 USER root
-
-# Update npm to latest version for cve handling
-RUN npm install -g npm@latest
 
 RUN apk add --no-cache python3 py3-pip
 
