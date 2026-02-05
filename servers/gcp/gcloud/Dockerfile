@@ -6,10 +6,9 @@ FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:late
 # Switch to root to install dependencies
 USER root
 
-# Install gcloud SDK dependencies
+# Install gcloud SDK dependencies (py3-pip not needed - gcloud SDK installed via curl)
 RUN apk add --no-cache \
     python3 \
-    py3-pip \
     bash \
     curl \
     gcc \
