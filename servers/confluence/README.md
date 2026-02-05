@@ -1,6 +1,10 @@
 # Confluence MCP Server
 
-An MCP server that provides Confluence integration for searching and retrieving documentation. Uses the [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) server to expose Confluence (and optionally Jira) tools.
+An MCP server that provides Confluence integration for searching and retrieving documentation. 
+
+Uses the community [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) mcp server to expose Confluence (and optionally Jira) tools.
+
+The official Atlassian mcp doesn't support api-key based authentication (only user based OAuth)
 
 ## Overview
 
@@ -22,27 +26,78 @@ Holmes -> Remote MCP (SSE) -> Confluence MCP Server -> Confluence API
 
 ## Quick Start
 
-```bash
-# 1. Create the secret with your Confluence credentials
-# Edit secret.yaml with your actual values first
-kubectl apply -f secret.yaml
+### 1. Create the Secret with the API token
 
-# 2. Deploy the MCP server
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
+**API Token** - Generate at https://id.atlassian.com/manage-profile/security/api-tokens
 
-# 3. Verify it's running
-kubectl get pods -l app=confluence-mcp
-kubectl logs -l app=confluence-mcp
+Edit `secret.yaml` with your actual credentials and the created token:
+
+```yaml
+apiVersion: v1                                                                                                                                                                                           
+kind: Secret                                                                                                                                                                                           
+metadata:                                                                                                                                                                                                
+  name: confluence-mcp-credentials
+  labels:
+    app: confluence-mcp
+type: Opaque
+stringData:
+  confluence-url: "https://your-company.atlassian.net/wiki"
+  confluence-username: "your-email@company.com"
+  confluence-api-token: "your-actual-api-token"
 ```
 
-## Prerequisites
+Apply the secret:
+```bash
+kubectl apply -f secret.yaml
+```
 
-1. **Confluence Cloud Account** with API access
-2. **API Token** - Generate at https://id.atlassian.com/manage-profile/security/api-tokens
-3. **Kubernetes Cluster** with kubectl configured
+### 2. Customize the Deployment (Optional)
 
-For Server/Data Center deployments, use a Personal Access Token instead.
+Edit `deployment.yaml` to:
+- Change the namespace
+- Configure enabled tools
+- Modify secret name (if you changed it)
+
+### 3. Deploy
+
+```bash
+kubectl apply -f deployment.yaml
+kubectl apply -f service.yaml
+```
+
+### 4. Verify
+
+```bash
+# Check pod status
+kubectl get pods -l app=confluence-mcp
+
+# Check logs
+kubectl logs -l app=confluence-mcp
+
+# Test connectivity
+kubectl run curl --image=curlimages/curl --rm -it --restart=Never -- \
+  curl -s http://confluence-mcp:8000/health
+```
+
+## Holmes Integration
+
+Add the MCP server to your Holmes configuration.
+You can add custom instructions, under the ``llm_instructions`` section, to instruct Holmes when and how to use Confluence.
+
+```yaml
+mcp_servers:
+  confluence:
+    description: "Confluence documentation search and retrieval"
+    config:
+      url: "http://confluence-mcp.default.svc.cluster.local:8000/sse"
+      mode: sse
+      headers:
+        Content-Type: "application/json"
+    llm_instructions: |
+      Use the Confluence MCP to search and retrieve documentation.
+      Before every investigation, search confluence for matching runbooks
+```
+
 
 ## Tools
 
@@ -110,81 +165,6 @@ Use the `ENABLED_TOOLS` environment variable to control which tools are exposed:
 
 **All tools (requires both Confluence and Jira credentials):**
 Remove or comment out the `ENABLED_TOOLS` environment variable to enable all available tools.
-
-## Deployment
-
-### 1. Create the Secret
-
-Edit `secret.yaml` with your actual credentials:
-
-```yaml
-stringData:
-  confluence-url: "https://your-company.atlassian.net/wiki"
-  confluence-username: "your-email@company.com"
-  confluence-api-token: "your-actual-api-token"
-```
-
-Apply the secret:
-```bash
-kubectl apply -f secret.yaml
-```
-
-### 2. Customize the Deployment (Optional)
-
-Edit `deployment.yaml` to:
-- Change the namespace
-- Adjust resource limits
-- Configure enabled tools
-- Add Jira credentials
-
-### 3. Deploy
-
-```bash
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
-```
-
-### 4. Verify
-
-```bash
-# Check pod status
-kubectl get pods -l app=confluence-mcp
-
-# Check logs
-kubectl logs -l app=confluence-mcp
-
-# Test connectivity
-kubectl run curl --image=curlimages/curl --rm -it --restart=Never -- \
-  curl -s http://confluence-mcp:8000/health
-```
-
-## Holmes Integration
-
-Add the MCP server to your Holmes configuration:
-
-```yaml
-mcp_servers:
-  confluence:
-    description: "Confluence documentation search and retrieval"
-    config:
-      url: "http://confluence-mcp.default.svc.cluster.local:8000/sse"
-      mode: sse
-      headers:
-        Content-Type: "application/json"
-    llm_instructions: |
-      Use the Confluence MCP to search and retrieve documentation.
-
-      Available tools:
-      - confluence_search: Search for pages using CQL
-      - confluence_get_page: Get page details by ID
-      - confluence_get_page_content: Get full page content
-
-      CQL examples:
-      - text ~ "deployment guide"
-      - space = "ENGINEERING" AND text ~ "architecture"
-```
-
-See `holmes-config/confluence-toolset.yaml` for a complete example.
 
 ## CQL Query Reference
 

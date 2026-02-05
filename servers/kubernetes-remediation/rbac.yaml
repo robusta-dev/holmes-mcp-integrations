@@ -51,7 +51,7 @@ rules:
   - apiGroups: [""]
     resources:
       - nodes
-    verbs: ["get", "list", "watch", "patch", "update"]
+    verbs: ["get", "list", "watch", "patch", "update", "delete"]
 
   # Deployments, DaemonSets, ReplicaSets, StatefulSets
   # Supports: scale, rollout restart, edit, patch, delete

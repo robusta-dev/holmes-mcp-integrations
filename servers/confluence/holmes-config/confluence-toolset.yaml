@@ -6,3 +6,6 @@ mcp_servers:
       mode: sse
       headers:
         Content-Type: "application/json"
+    llm_instructions: |
+      Use the Confluence MCP to search and retrieve documentation.
+      Before every investigation, search confluence for matching runbooks
