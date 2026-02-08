@@ -1,18 +1,14 @@
 # gcloud MCP Server with Supergateway
 # Uses Supergateway base image to convert STDIO MCP to HTTP/SSE API
 
-FROM supercorp/supergateway:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
 
 # Switch to root to install dependencies
 USER root
 
-# Update npm to latest version for security
-RUN npm install -g npm@latest
-
-# Install gcloud SDK dependencies
+# Install gcloud SDK dependencies (py3-pip not needed - gcloud SDK installed via curl)
 RUN apk add --no-cache \
     python3 \
-    py3-pip \
     bash \
     curl \
     gcc \

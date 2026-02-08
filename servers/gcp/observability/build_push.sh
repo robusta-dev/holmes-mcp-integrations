@@ -1,2 +1,0 @@
-#!/bin/bash
-docker buildx build --pull --no-cache --build-arg BUILDKIT_INLINE_CACHE=1 --platform linux/arm64,linux/amd64 --tag me-west1-docker.pkg.dev/robusta-development/development/gcloud-observability-mcp:1.0.0 --push .

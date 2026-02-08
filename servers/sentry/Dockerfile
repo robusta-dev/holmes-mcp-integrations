@@ -1,13 +1,10 @@
 # Sentry MCP Server with Supergateway
 # Wraps the Sentry MCP stdio server and exposes it as SSE HTTP API
 
-FROM supercorp/supergateway:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
 
 # Switch to root to install dependencies
 USER root
-
-# Update npm to latest version for security
-RUN npm install -g npm@latest
 
 # Install Sentry MCP server globally
 RUN npm install -g @sentry/mcp-server
