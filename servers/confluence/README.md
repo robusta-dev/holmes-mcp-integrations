@@ -86,7 +86,7 @@ You can add custom instructions, under the ``llm_instructions`` section, to inst
 
 ```yaml
 mcp_servers:
-  confluence:
+  confluence-mcp:
     description: "Confluence documentation search and retrieval"
     config:
       url: "http://confluence-mcp.default.svc.cluster.local:8000/sse"
