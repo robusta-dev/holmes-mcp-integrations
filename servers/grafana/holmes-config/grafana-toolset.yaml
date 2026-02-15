@@ -1,0 +1,14 @@
+# Holmes configuration for Grafana MCP integration
+# Add this to your Holmes configuration to enable Grafana observability tools.
+#
+# Provides access to dashboards, Prometheus/Loki/Mimir queries, alerting,
+# incidents, OnCall, annotations, and more.
+
+mcp_servers:
+  grafana:
+    description: "Grafana observability platform - dashboards, Prometheus, Loki, Mimir, alerting, and incidents"
+    config:
+      url: "http://grafana-mcp.default.svc.cluster.local:8000/sse"
+      mode: sse
+      headers:
+        Content-Type: "application/json"

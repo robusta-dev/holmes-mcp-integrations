@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana-mcp
+  labels:
+    app: grafana-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana-mcp
+  template:
+    metadata:
+      labels:
+        app: grafana-mcp
+    spec:
+      containers:
+      - name: mcp-server
+        image: us-central1-docker.pkg.dev/genuine-flight-317411/mcp/grafana-mcp:1.0.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        # Required: Grafana instance URL
+        - name: GRAFANA_URL
+          valueFrom:
+            secretKeyRef:
+              name: grafana-mcp-credentials
+              key: grafana-url
+
+        # Authentication: Service Account Token (recommended)
+        - name: GRAFANA_SERVICE_ACCOUNT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: grafana-mcp-credentials
+              key: grafana-service-account-token
+              optional: true
+
+        # Authentication: Basic Auth (alternative)
+        # - name: GRAFANA_USERNAME
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: grafana-mcp-credentials
+        #       key: grafana-username
+        #       optional: true
+        # - name: GRAFANA_PASSWORD
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: grafana-mcp-credentials
+        #       key: grafana-password
+        #       optional: true
+
+        # Optional: Organization ID for multi-org setups
+        # - name: GRAFANA_ORG_ID
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: grafana-mcp-credentials
+        #       key: grafana-org-id
+        #       optional: true
+
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
