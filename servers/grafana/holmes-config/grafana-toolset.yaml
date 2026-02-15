@@ -1,0 +1,23 @@
+# Holmes configuration for Grafana MCP integration
+# Add this to your Holmes configuration to enable Grafana tools
+#
+# Available tool categories from Grafana MCP:
+#   - Dashboards: search, retrieve, and summarize dashboards
+#   - Datasources: list and inspect Prometheus, Loki, ClickHouse datasources
+#   - Prometheus: query metrics, metadata, label names/values
+#   - Loki: query logs, metadata, label values, log patterns
+#   - Alerts: list and inspect alert rules and contact points
+#   - Annotations: query and create annotations
+#   - OnCall: schedules, shifts, teams, alert groups
+#   - Incidents: list and manage Grafana incidents
+#   - Navigation: generate deeplinks for dashboards and Explore
+
+mcp_servers:
+  grafana:
+    description: "Grafana dashboards, metrics, logs, and alerting"
+    config:
+      url: "http://grafana-mcp.default.svc.cluster.local:8000/mcp"
+      mode: streamable-http
+    icon_url: "https://cdn.simpleicons.org/grafana/F46800"
+    llm_instructions: |
+      Use Grafana to query prometheus dashboards, view visualizations, and explore metrics. Use for dashboard-based troubleshooting and when you need pre-built visualizations.
