@@ -1,0 +1,68 @@
+# Minimal Prefect server for testing the MCP integration
+# Deploys a single-pod Prefect server with SQLite (no Postgres needed)
+#
+# Usage:
+#   kubectl create namespace prefect
+#   kubectl apply -f prefect-server.yaml -n prefect
+#   kubectl wait --for=condition=ready pod -l app=prefect-server -n prefect --timeout=120s
+#
+# Then port-forward to access the UI:
+#   kubectl port-forward -n prefect svc/prefect-server 4200:4200
+#   Open http://localhost:4200
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prefect-server
+  labels:
+    app: prefect-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prefect-server
+  template:
+    metadata:
+      labels:
+        app: prefect-server
+    spec:
+      containers:
+      - name: prefect-server
+        image: prefecthq/prefect:3-latest
+        command: ["prefect", "server", "start", "--host", "0.0.0.0", "--port", "4200"]
+        ports:
+        - containerPort: 4200
+          name: http
+          protocol: TCP
+        env:
+        - name: PREFECT_HOME
+          value: "/tmp/prefect"
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 4200
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prefect-server
+  labels:
+    app: prefect-server
+spec:
+  type: ClusterIP
+  ports:
+  - port: 4200
+    targetPort: 4200
+    protocol: TCP
+    name: http
+  selector:
+    app: prefect-server

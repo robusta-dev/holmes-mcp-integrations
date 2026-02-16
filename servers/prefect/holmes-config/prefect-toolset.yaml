@@ -1,0 +1,22 @@
+# Holmes configuration for Prefect MCP integration
+# Add this to your Holmes configuration to enable Prefect workflow orchestration tools
+#
+# Available tools from Prefect MCP:
+#   - Flow runs: list, filter, get details and logs
+#   - Deployments: list and inspect deployment configurations
+#   - Task runs: get task-level execution details
+#   - Work pools: check pool status and worker health
+#   - Logs: retrieve detailed execution logs
+#   - Events: query Prefect event stream
+#   - Automations: list configured automations
+#   - Docs: look up Prefect documentation
+
+mcp_servers:
+  prefect:
+    description: "Prefect workflow orchestration and observability"
+    config:
+      url: "http://prefect-mcp.default.svc.cluster.local:8000/sse"
+      mode: sse
+      headers:
+        Content-Type: "application/json"
+    llm_instructions: "Use the Prefect tools to investigate workflow failures, check flow run status, and analyze orchestration issues. When a flow run fails, retrieve its logs and task run details to find the root cause. Check work pool status to identify infrastructure problems."

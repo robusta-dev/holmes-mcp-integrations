@@ -1,0 +1,95 @@
+# Kubernetes Job to seed the Prefect server with sample data
+# Run this after the Prefect server is up and healthy
+#
+# Usage:
+#   kubectl apply -f seed-job.yaml -n prefect
+#   kubectl logs -f job/prefect-seed-data -n prefect
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prefect-seed-script
+data:
+  seed-data.py: |
+    from prefect import flow, task
+    import time, random
+
+    @task
+    def extract_data(source: str):
+        time.sleep(0.5)
+        rows = random.randint(100, 10000)
+        print(f"Extracted {rows} rows from {source}")
+        return {"source": source, "rows": rows}
+
+    @task
+    def transform_data(data: dict):
+        time.sleep(0.3)
+        data["transformed"] = True
+        data["rows_after_filter"] = int(data["rows"] * 0.8)
+        print(f"Transformed {data['rows']} -> {data['rows_after_filter']} rows")
+        return data
+
+    @task
+    def load_data(data: dict, destination: str):
+        time.sleep(0.2)
+        print(f"Loaded {data['rows_after_filter']} rows to {destination}")
+        return True
+
+    @flow(name="etl-pipeline")
+    def etl_pipeline(source="postgres", destination="warehouse"):
+        raw = extract_data(source)
+        transformed = transform_data(raw)
+        load_data(transformed, destination)
+
+    @flow(name="health-check")
+    def health_check():
+        print("All systems operational")
+
+    @flow(name="failing-pipeline")
+    def failing_pipeline():
+        extract_data("broken-source")
+        raise ValueError("Connection refused: could not connect to source database")
+
+    @flow(name="data-sync")
+    def data_sync():
+        for src in ["users-db", "orders-db", "inventory-db"]:
+            raw = extract_data(src)
+            transformed = transform_data(raw)
+            load_data(transformed, f"{src}-replica")
+
+    if __name__ == "__main__":
+        print("=== Seeding Prefect ===")
+        etl_pipeline()
+        health_check()
+        data_sync()
+        try:
+            failing_pipeline()
+        except:
+            pass
+        for i in range(3):
+            etl_pipeline(source=f"source-{i}")
+        print("=== Done ===")
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prefect-seed-data
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: seed
+        image: prefecthq/prefect:3-latest
+        command: ["python", "/scripts/seed-data.py"]
+        env:
+        - name: PREFECT_API_URL
+          value: "http://prefect-server.prefect.svc.cluster.local:4200/api"
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+      volumes:
+      - name: script
+        configMap:
+          name: prefect-seed-script
