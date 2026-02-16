@@ -100,10 +100,9 @@ This creates several flow runs:
 ### Step 3: Deploy the MCP server pointing at the test Prefect
 
 ```bash
-# Create the secret pointing at the test server
+# Create the secret pointing at the test server (no auth needed for local Prefect)
 kubectl create secret generic prefect-mcp-credentials \
   --from-literal=prefect-api-url="http://prefect-server.prefect.svc.cluster.local:4200/api" \
-  --from-literal=prefect-api-key="" \
   -n prefect
 
 # Deploy the MCP server
