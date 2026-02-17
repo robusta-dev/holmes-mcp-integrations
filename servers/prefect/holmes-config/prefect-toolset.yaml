@@ -1,0 +1,29 @@
+# Holmes configuration for Prefect MCP integration
+# Add this to your Holmes configuration to enable Prefect workflow tools
+#
+# Available tools from Prefect MCP:
+#   - Flow run management: list, inspect, and filter flow runs
+#   - Deployment management: list and trigger deployments
+#   - Work pool/queue status: check worker health and queue backlogs
+#   - Log retrieval: get logs from specific flow/task runs
+#   - Artifact inspection: view results and metadata from runs
+
+mcp_servers:
+  prefect:
+    description: "Prefect workflow orchestration and monitoring"
+    config:
+      url: "http://prefect-mcp.default.svc.cluster.local:8000/sse"
+      mode: sse
+      headers:
+        Content-Type: "application/json"
+    llm_instructions: |
+      Use Prefect tools to investigate workflow failures, check flow run status, and troubleshoot orchestration issues.
+      When investigating a failed flow run:
+        1. First get the flow run details to understand what failed
+        2. Retrieve the logs for the failed flow/task run
+        3. Check if the deployment is healthy and workers are running
+        4. Look at recent runs of the same flow to identify patterns (intermittent vs persistent failures)
+      When checking overall health:
+        1. Check work pool and work queue status for stuck or backlogged runs
+        2. Look for flows in a "Crashed" or "Failed" state
+        3. Verify deployments are active and scheduled
