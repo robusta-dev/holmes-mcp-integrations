@@ -1,0 +1,82 @@
+# Holmes configuration for Conviva MCP integration
+# Add this to your Holmes configuration to enable Conviva analytics tools
+#
+# Conviva provides 5 hosted MCP servers (no in-cluster deployment needed):
+#   - VSI Metrics: aggregate streaming video quality metrics
+#   - VSI AI Alerts: AI-detected anomaly alerts for streaming video
+#   - VSI Sessions: per-viewer session-level streaming details
+#   - DPI Metrics: web and app digital performance metrics
+#   - DPI AI Alerts: AI-detected anomaly alerts for digital performance
+#
+# You can omit servers you don't need (e.g., skip DPI if only monitoring video streaming)
+#
+# Prerequisites:
+#   - Conviva account with API access
+#   - API credential from Conviva Pulse > API Management
+#   - Replace <CONVIVA_API_CREDENTIAL> with your Base64-encoded API credential
+
+mcp_servers:
+  conviva_vsi_metrics:
+    description: "Conviva VSI — real-time and historic aggregate streaming video metrics"
+    config:
+      url: "https://mcp.conviva.com/vsi/metrics"
+      mode: streamable-http
+      headers:
+        Authorization: "Basic <CONVIVA_API_CREDENTIAL>"
+    llm_instructions: |
+      Use this to query aggregate streaming video quality metrics from Conviva.
+      Covers metrics like concurrent plays, bitrate, video start failures,
+      buffering ratio, and video startup time across dimensions like CDN,
+      device, ISP, city, and content.
+
+  conviva_vsi_ai_alerts:
+    description: "Conviva VSI — AI-detected anomaly alerts for streaming video"
+    config:
+      url: "https://mcp.conviva.com/vsi/ai-alerts"
+      mode: streamable-http
+      headers:
+        Authorization: "Basic <CONVIVA_API_CREDENTIAL>"
+    llm_instructions: |
+      Use this to retrieve AI-generated anomaly alerts for streaming video.
+      These alerts detect sudden changes in video quality metrics like
+      buffering, bitrate drops, or playback failures. Use when investigating
+      streaming quality degradations or outages.
+
+  conviva_vsi_sessions:
+    description: "Conviva VSI — per-viewer session-level streaming details"
+    config:
+      url: "https://mcp.conviva.com/vsi/sessions"
+      mode: streamable-http
+      headers:
+        Authorization: "Basic <CONVIVA_API_CREDENTIAL>"
+    llm_instructions: |
+      Use this to look up individual viewer session details from Conviva.
+      Provides per-session data including device info, network conditions,
+      content viewed, and quality events. Use when debugging a specific
+      viewer's experience or correlating user-reported issues.
+
+  conviva_dpi_metrics:
+    description: "Conviva DPI — web and app digital performance metrics"
+    config:
+      url: "https://mcp.conviva.com/dpi/metrics"
+      mode: streamable-http
+      headers:
+        Authorization: "Basic <CONVIVA_API_CREDENTIAL>"
+    llm_instructions: |
+      Use this to query digital performance metrics from Conviva.
+      Covers web and app performance indicators like page load time,
+      time to interactive, API latency, and error rates. Use when
+      investigating frontend or app performance issues.
+
+  conviva_dpi_ai_alerts:
+    description: "Conviva DPI — AI-detected anomaly alerts for digital performance"
+    config:
+      url: "https://mcp.conviva.com/dpi/ai-alerts"
+      mode: streamable-http
+      headers:
+        Authorization: "Basic <CONVIVA_API_CREDENTIAL>"
+    llm_instructions: |
+      Use this to retrieve AI-generated anomaly alerts for digital performance.
+      These alerts detect sudden changes in web/app metrics like page load
+      time spikes or error rate increases. Use when investigating digital
+      experience degradations.
