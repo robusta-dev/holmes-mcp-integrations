@@ -13,32 +13,73 @@ _refresh_thread = None
 AWS_ACCOUNT_ROLES_FILE = os.environ.get('AWS_ACCOUNT_ROLES_FILE', '/etc/aws/accounts.yaml')
 AWS_REFRESH_CREDENTIALS_SEC = int(os.environ.get('AWS_REFRESH_CREDENTIALS_SEC', '3000'))
 
+# Auth modes
+AUTH_MODE_IRSA = 'irsa'
+AUTH_MODE_STATIC = 'static'
+AUTH_MODE_STATIC_PER_PROFILE = 'static_per_profile'
+
 def config_file_exists(config_path: str = AWS_ACCOUNT_ROLES_FILE) -> bool:
     return os.path.exists(config_path)
 
 def has_valid_config(config_path: str = AWS_ACCOUNT_ROLES_FILE) -> bool:
     if not config_file_exists(config_path):
         return False
-    
+
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-        
+
         if not config or 'profiles' not in config:
             return False
-        
+
         return True
     except Exception as e:
         logger.warning(f"Failed to validate config file {config_path}: {e}")
         return False
 
+def _detect_auth_mode(config: dict) -> str:
+    """
+    Detect which authentication mode to use based on the config file contents.
+
+    Priority:
+    1. Explicit 'auth_mode' field in config
+    2. If 'credentials' section exists at top level -> static (central creds + AssumeRole)
+    3. If any profile has 'access_key_id' -> static_per_profile (direct creds per profile)
+    4. Default -> irsa
+    """
+    explicit_mode = config.get('auth_mode')
+    if explicit_mode:
+        if explicit_mode not in (AUTH_MODE_IRSA, AUTH_MODE_STATIC, AUTH_MODE_STATIC_PER_PROFILE):
+            raise ValueError(f"Invalid auth_mode: '{explicit_mode}'. Must be one of: {AUTH_MODE_IRSA}, {AUTH_MODE_STATIC}, {AUTH_MODE_STATIC_PER_PROFILE}")
+        return explicit_mode
+
+    if 'credentials' in config:
+        return AUTH_MODE_STATIC
+
+    for profile_config in config.get('profiles', {}).values():
+        if 'access_key_id' in profile_config:
+            return AUTH_MODE_STATIC_PER_PROFILE
+
+    return AUTH_MODE_IRSA
+
 def _credentials_to_file_lines(profile_name: str, creds: dict) -> list:
     """Convert AWS credentials dict to credentials file format lines."""
-    return [
+    lines = [
         f'[{profile_name}]',
         f"aws_access_key_id = {creds['AccessKeyId']}",
         f"aws_secret_access_key = {creds['SecretAccessKey']}",
-        f"aws_session_token = {creds['SessionToken']}",
+    ]
+    if creds.get('SessionToken'):
+        lines.append(f"aws_session_token = {creds['SessionToken']}")
+    lines.append('')
+    return lines
+
+def _static_credentials_to_file_lines(profile_name: str, access_key_id: str, secret_access_key: str) -> list:
+    """Convert static AWS credentials to credentials file format lines (no session token)."""
+    return [
+        f'[{profile_name}]',
+        f"aws_access_key_id = {access_key_id}",
+        f"aws_secret_access_key = {secret_access_key}",
         ''
     ]
 
@@ -48,6 +89,15 @@ def _assume_role_with_web_identity(sts_client, profile_name: str, role_arn: str,
         RoleArn=role_arn,
         RoleSessionName=f"{profile_name}-mcp-{datetime.now().strftime('%Y%m%d%H%M%S')}",
         WebIdentityToken=token,
+        DurationSeconds=duration_seconds
+    )
+    return response['Credentials']
+
+def _assume_role_with_static_credentials(sts_client, profile_name: str, role_arn: str, duration_seconds: int = 3600) -> dict:
+    """Assume IAM role using static credentials (the sts_client is already configured with access key/secret)."""
+    response = sts_client.assume_role(
+        RoleArn=role_arn,
+        RoleSessionName=f"{profile_name}-mcp-{datetime.now().strftime('%Y%m%d%H%M%S')}",
         DurationSeconds=duration_seconds
     )
     return response['Credentials']
@@ -63,62 +113,67 @@ def _write_credentials_file(credentials_path: str, credentials_lines: list):
 def _write_config_file(config_path: str, default_region: str, profile_regions: dict):
     """
     Write AWS config file with per-profile region settings.
-    
+
     The config file is different from the credentials file:
     - Credentials file (~/.aws/credentials): Contains actual AWS credentials (access keys, secrets, tokens)
       that expire and need to be refreshed periodically (every ~50 minutes)
     - Config file (~/.aws/config): Contains static configuration like region settings, output format, etc.
       This doesn't change unless profiles are added/removed, so it only needs to be written once during setup.
-    
+
     Args:
         config_path: Path where config file will be written
         default_region: Default region for [default] profile
         profile_regions: Dict mapping profile names to their regions
     """
     config_lines = ['[default]', f'region = {default_region}', '']
-    
+
     # Add per-profile region configurations
     for profile_name, profile_region in profile_regions.items():
         config_lines.append(f'[profile {profile_name}]')
         config_lines.append(f'region = {profile_region}')
         config_lines.append('')
-    
+
     with open(config_path, 'w') as f:
         f.write('\n'.join(config_lines))
 
-def _process_profiles_to_credentials(config: dict, token: str, default_region: str) -> tuple:
-    """
-    Process all profiles from config and return credentials file lines and profile regions.
-    
-    Args:
-        config: Configuration dict with 'profiles' key
-        token: Web identity token for assume_role_with_web_identity
-        default_region: Default region to use if profile doesn't specify one
-    
-    Returns:
-        Tuple of (credentials_lines, profile_regions_dict)
-    
-    Raises:
-        Exception: If any profile fails to process, logs the problematic profile and raises
-    """
+def _get_static_sts_client(config: dict, region: str):
+    """Create an STS client using the central static credentials from config."""
+    creds = config['credentials']
+    access_key_id = creds.get('access_key_id') or os.environ.get('AWS_ACCESS_KEY_ID')
+    secret_access_key = creds.get('secret_access_key') or os.environ.get('AWS_SECRET_ACCESS_KEY')
+
+    if not access_key_id or not secret_access_key:
+        raise ValueError(
+            "Static auth_mode requires credentials. Provide 'access_key_id' and 'secret_access_key' "
+            "in the 'credentials' section of the config file, or set AWS_ACCESS_KEY_ID and "
+            "AWS_SECRET_ACCESS_KEY environment variables."
+        )
+
+    return boto3.client(
+        'sts',
+        region_name=region,
+        aws_access_key_id=access_key_id,
+        aws_secret_access_key=secret_access_key
+    )
+
+def _process_profiles_irsa(config: dict, token: str, default_region: str) -> tuple:
+    """Process all profiles using IRSA (web identity) authentication."""
     credentials_lines = []
     profile_regions = {}
-    
+
     for profile_name, profile_config in config['profiles'].items():
         try:
-            # Use profile-specific region if provided, otherwise use default
             profile_region = profile_config.get('region', default_region)
             profile_regions[profile_name] = profile_region
-            
-            # Create STS client with profile's region (STS is global but good practice)
+
             sts_client = boto3.client('sts', region_name=profile_region)
-            
+
             creds = _assume_role_with_web_identity(
                 sts_client, profile_name, profile_config['role_arn'], token
             )
             credential_file_lines = _credentials_to_file_lines(profile_name, creds)
             credentials_lines.extend(credential_file_lines)
-            
+
             account_id = profile_config.get('account_id')
             if not account_id:
                 raise Exception(f"Missing 'account_id' in profile configuration {profile_name}")
@@ -126,32 +181,139 @@ def _process_profiles_to_credentials(config: dict, token: str, default_region: s
         except Exception as e:
             logger.error(f"Failed to process profile '{profile_name}': {e}", exc_info=True)
             raise
-    
+
     return credentials_lines, profile_regions
+
+def _process_profiles_static(config: dict, default_region: str) -> tuple:
+    """Process all profiles using central static credentials + AssumeRole."""
+    credentials_lines = []
+    profile_regions = {}
+
+    for profile_name, profile_config in config['profiles'].items():
+        try:
+            profile_region = profile_config.get('region', default_region)
+            profile_regions[profile_name] = profile_region
+
+            sts_client = _get_static_sts_client(config, profile_region)
+
+            creds = _assume_role_with_static_credentials(
+                sts_client, profile_name, profile_config['role_arn']
+            )
+            credential_file_lines = _credentials_to_file_lines(profile_name, creds)
+            credentials_lines.extend(credential_file_lines)
+
+            account_id = profile_config.get('account_id')
+            if not account_id:
+                raise Exception(f"Missing 'account_id' in profile configuration {profile_name}")
+            logger.info(f"✓ Processed profile: {profile_name} (account: {account_id}, region: {profile_region})")
+        except Exception as e:
+            logger.error(f"Failed to process profile '{profile_name}': {e}", exc_info=True)
+            raise
+
+    return credentials_lines, profile_regions
+
+def _process_profiles_static_per_profile(config: dict, default_region: str) -> tuple:
+    """
+    Process all profiles using per-profile static credentials (no AssumeRole).
+    Each profile has its own access_key_id and secret_access_key.
+    """
+    credentials_lines = []
+    profile_regions = {}
+
+    for profile_name, profile_config in config['profiles'].items():
+        try:
+            profile_region = profile_config.get('region', default_region)
+            profile_regions[profile_name] = profile_region
+
+            access_key_id = profile_config.get('access_key_id')
+            secret_access_key = profile_config.get('secret_access_key')
+
+            if not access_key_id or not secret_access_key:
+                raise ValueError(
+                    f"Profile '{profile_name}' requires 'access_key_id' and 'secret_access_key' "
+                    f"when using {AUTH_MODE_STATIC_PER_PROFILE} auth mode."
+                )
+
+            credential_file_lines = _static_credentials_to_file_lines(
+                profile_name, access_key_id, secret_access_key
+            )
+            credentials_lines.extend(credential_file_lines)
+
+            account_id = profile_config.get('account_id')
+            if not account_id:
+                raise Exception(f"Missing 'account_id' in profile configuration {profile_name}")
+            logger.info(f"✓ Processed profile: {profile_name} (account: {account_id}, region: {profile_region})")
+        except Exception as e:
+            logger.error(f"Failed to process profile '{profile_name}': {e}", exc_info=True)
+            raise
+
+    return credentials_lines, profile_regions
+
+def _process_profiles_to_credentials(config: dict, token: str, default_region: str) -> tuple:
+    """
+    Process all profiles from config and return credentials file lines and profile regions.
+
+    Delegates to the appropriate handler based on the detected auth mode.
+
+    Args:
+        config: Configuration dict with 'profiles' key
+        token: Web identity token (only used for IRSA mode, can be None for other modes)
+        default_region: Default region to use if profile doesn't specify one
+
+    Returns:
+        Tuple of (credentials_lines, profile_regions_dict)
+
+    Raises:
+        Exception: If any profile fails to process, logs the problematic profile and raises
+    """
+    auth_mode = _detect_auth_mode(config)
+    logger.info(f"Using auth mode: {auth_mode}")
+
+    if auth_mode == AUTH_MODE_IRSA:
+        return _process_profiles_irsa(config, token, default_region)
+    elif auth_mode == AUTH_MODE_STATIC:
+        return _process_profiles_static(config, default_region)
+    elif auth_mode == AUTH_MODE_STATIC_PER_PROFILE:
+        return _process_profiles_static_per_profile(config, default_region)
+    else:
+        raise ValueError(f"Unknown auth_mode: {auth_mode}")
 
 def _refresh_credentials(config_path: str, token_path: str, aws_dir: str) -> dict:
     """
     Refresh credentials by reading config/token, processing profiles, and writing credentials file.
-    
+
     Returns:
         Dictionary mapping profile names to their regions
-    
+
     Raises:
         Exception: If any profile fails to process
     """
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-    
-    with open(token_path, 'r') as f:
-        token = f.read().strip()
-    
+
+    auth_mode = _detect_auth_mode(config)
+
+    # Only read the IRSA token file for IRSA mode
+    token = None
+    if auth_mode == AUTH_MODE_IRSA:
+        with open(token_path, 'r') as f:
+            token = f.read().strip()
+
     default_region = config.get('region', 'us-east-2')
     credentials_path = os.path.join(aws_dir, 'credentials')
-    
+
     credentials_lines, profile_regions = _process_profiles_to_credentials(config, token, default_region)
     _write_credentials_file(credentials_path, credentials_lines)
-    
+
     return profile_regions
+
+def _needs_refresh(config_path: str) -> bool:
+    """Check if the auth mode requires periodic credential refresh."""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    auth_mode = _detect_auth_mode(config)
+    # static_per_profile uses permanent credentials, no refresh needed
+    return auth_mode != AUTH_MODE_STATIC_PER_PROFILE
 
 def _refresh_loop(config_path, token_path, aws_dir):
     """
@@ -173,7 +335,12 @@ def setup_aws_profiles(
 ):
     """
     Set up AWS profiles by refreshing credentials and starting background refresh thread.
-    
+
+    Supports three authentication modes (auto-detected from config or set explicitly):
+    - irsa: Uses IRSA web identity token to assume roles (default, requires EKS)
+    - static: Uses central AWS access key/secret to assume roles in target accounts
+    - static_per_profile: Uses per-profile AWS access keys directly (no role assumption)
+
     _refresh_thread is a module-level global variable to track the background refresh thread.
     It needs to be global because setup_aws_profiles may be called multiple times, and we need
     to ensure only one refresh thread is running at a time.
@@ -184,35 +351,42 @@ def setup_aws_profiles(
     elif not has_valid_config():
         logger.error(f"Custom config file {AWS_ACCOUNT_ROLES_FILE} invalid format, skipping profile setup")
         return
-    
+
     global _refresh_thread
-    
+
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-    
+
     if not config or 'profiles' not in config:
         raise ValueError("Invalid config: missing 'profiles' section")
-    
+
+    auth_mode = _detect_auth_mode(config)
+    logger.info(f"Detected auth mode: {auth_mode}")
+
     os.makedirs(aws_dir, exist_ok=True)
-    
+
     # Refresh credentials (writes credentials file and returns profile regions)
     profile_regions = _refresh_credentials(config_path, token_path, aws_dir)
-    
+
     # Write config file with per-profile regions (only needs to be done once during setup)
     default_region = config.get('region', 'us-east-2')
     config_path_out = os.path.join(aws_dir, 'config')
     _write_config_file(config_path_out, default_region, profile_regions)
-    
+
     logger.info(f"Wrote AWS credentials/config to {aws_dir}")
-    
-    if _refresh_thread is None or not _refresh_thread.is_alive():
-        _refresh_thread = threading.Thread(
-            target=_refresh_loop,
-            args=(config_path, token_path, aws_dir),
-            daemon=True
-        )
-        _refresh_thread.start()
-        logger.info(f"Started credential refresh thread (interval: {AWS_REFRESH_CREDENTIALS_SEC} seconds)")
+
+    # Only start refresh thread for modes that use temporary credentials
+    if _needs_refresh(config_path):
+        if _refresh_thread is None or not _refresh_thread.is_alive():
+            _refresh_thread = threading.Thread(
+                target=_refresh_loop,
+                args=(config_path, token_path, aws_dir),
+                daemon=True
+            )
+            _refresh_thread.start()
+            logger.info(f"Started credential refresh thread (interval: {AWS_REFRESH_CREDENTIALS_SEC} seconds)")
+    else:
+        logger.info("Using static per-profile credentials, no refresh thread needed")
 
     profiles = list(config['profiles'].keys())
     logger.info(f"Set up {len(profiles)} AWS profiles: {', '.join(profiles)}")
