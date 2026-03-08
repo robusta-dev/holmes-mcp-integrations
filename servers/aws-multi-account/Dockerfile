@@ -7,7 +7,9 @@ RUN apk add --no-cache python3 py3-pip
 RUN pip3 install --no-cache-dir --break-system-packages \
     awslabs.aws-api-mcp-server \
     boto3 \
-    pyyaml
+    pyyaml && \
+    pip3 install --no-cache-dir --break-system-packages --upgrade \
+    jaraco-context wheel cryptography setuptools pip
 
 COPY aws_auth.py /app/
 COPY wrapper.py /app/

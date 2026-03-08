@@ -9,7 +9,9 @@ USER root
 RUN apk add --no-cache python3 py3-pip
 
 # Install AWS API MCP server
-RUN pip3 install --no-cache-dir --break-system-packages awslabs.aws-api-mcp-server
+RUN pip3 install --no-cache-dir --break-system-packages awslabs.aws-api-mcp-server && \
+    pip3 install --no-cache-dir --break-system-packages --upgrade \
+    jaraco-context wheel cryptography setuptools pip
 
 USER node
 EXPOSE 8000

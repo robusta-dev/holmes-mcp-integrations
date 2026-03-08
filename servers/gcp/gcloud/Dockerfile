@@ -6,9 +6,10 @@ FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:late
 # Switch to root to install dependencies
 USER root
 
-# Install gcloud SDK dependencies (py3-pip not needed - gcloud SDK installed via curl)
+# Install gcloud SDK dependencies
 RUN apk add --no-cache \
     python3 \
+    py3-pip \
     bash \
     curl \
     gcc \
@@ -18,13 +19,20 @@ RUN apk add --no-cache \
 
 # Install Google Cloud SDK without any configuration
 ENV PATH="/google-cloud-sdk/bin:${PATH}"
-RUN curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-550.0.0-linux-x86_64.tar.gz && \
-    tar xzf google-cloud-cli-550.0.0-linux-x86_64.tar.gz && \
-    rm google-cloud-cli-550.0.0-linux-x86_64.tar.gz && \
+RUN curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz && \
+    tar xzf google-cloud-cli-linux-x86_64.tar.gz && \
+    rm google-cloud-cli-linux-x86_64.tar.gz && \
     /google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=false && \
     rm -rf /root/.config/gcloud && \
     rm -rf /root/.gsutil && \
     rm -rf /root/.docker
+
+# Upgrade Python packages to fix CVEs (cryptography, jaraco-context, wheel)
+RUN pip3 install --no-cache-dir --break-system-packages --upgrade \
+    jaraco-context wheel cryptography setuptools pip && \
+    rm -rf /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/cryptography* \
+           /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/setuptools/_vendor/wheel-*.dist-info \
+           /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/wheel-*.dist-info
 
 # Pre-install the gcloud MCP package to cache it
 RUN npx -y @google-cloud/gcloud-mcp --version || true

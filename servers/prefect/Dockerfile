@@ -10,7 +10,9 @@ USER root
 RUN apk add --no-cache python3 py3-pip
 
 # Install prefect-mcp at build time so no outbound network is needed at runtime
-RUN pip3 install --no-cache-dir --break-system-packages prefect-mcp
+RUN pip3 install --no-cache-dir --break-system-packages prefect-mcp && \
+    pip3 install --no-cache-dir --break-system-packages --upgrade \
+    jaraco-context wheel cryptography setuptools pip
 
 USER node
 EXPOSE 8000
