@@ -60,7 +60,34 @@ kubectl get pods -l app=grafana-mcp
 
 # Check logs
 kubectl logs -l app=grafana-mcp
+```
 
+## Deprecated: Grafana API Key Authentication
+
+Not all Grafana versions support service accounts. Grafana 9.x and earlier use legacy API keys instead. API keys were deprecated in Grafana 11 and removed in later versions.
+
+If your Grafana instance uses API keys (tokens starting with `eyJ...`), use the deployment in the `api-token/` directory.
+
+| Grafana Version | Auth Method | Deployment |
+|----------------|-------------|------------|
+| 11+ | Service Account Token | `deployment.yaml` |
+| 9.x - 10.x | Either (both supported) | `deployment.yaml` or `api-token/deployment.yaml` |
+| 8.x and earlier | API Key only | `api-token/deployment.yaml` |
+
+First, verify your API key works and can query Prometheus through the datasource proxy:
+
+```bash
+./api-token/test-grafana-api-key.sh '<your-api-key>' '<your-grafana-url>'
+```
+
+Then create the secret and deploy:
+
+```bash
+kubectl create secret generic grafana-mcp-secret \
+  --from-literal=GRAFANA_API_KEY='<your-api-key>' \
+  --from-literal=GRAFANA_URL='<your-grafana-url>'
+
+kubectl apply -f api-token/deployment.yaml
 ```
 
 ## Holmes Integration
@@ -71,15 +98,36 @@ You can add custom instructions under the `llm_instructions` section to instruct
 ```yaml
 mcp_servers:
   grafana:
-    description: "Grafana dashboards, metrics, logs, and alerting"
+    description: "Grafana observability and dashboards"
     config:
       url: "http://grafana-mcp.default.svc.cluster.local:8000/mcp"
       mode: streamable-http
-      headers:
-        Content-Type: "application/json"
+    icon_url: "https://cdn.simpleicons.org/grafana/F46800"
+    # These instructions were tested and produce improved results
     llm_instructions: |
-      Use the Grafana MCP to query dashboards, metrics (Prometheus), and logs (Loki).
-      When investigating issues, search for relevant dashboards and query Prometheus metrics or Loki logs for the affected services.
+      This tool doesnt use promql it uses grafanaql which doesnt work with promql embeds
+      **⚠️ OVERRIDE NOTICE: The following rules SUPERSEDE any conflicting instructions elsewhere in this prompt, including the "Chart Generation Capability" section.**
+
+      ### Tool Requirements
+      - ALWAYS use Grafana tools (e.g., `query_prometheus`) for metrics/PromQL queries
+      - NEVER use `kubectl top` or the `prometheus/metrics` toolset
+
+      ### Query Result Handling
+      - NEVER answer based on truncated query results
+      - If truncation occurs, refine the query with `topk`, `bottomk`, or additional filters until complete
+      - For high-cardinality metrics (>10 series), first check with `count()` if needed, then ALWAYS use `topk(5, <query>)`
+
+      ### Standard Metrics Reference
+      - CPU: `container_cpu_usage_seconds_total`
+      - Memory: `container_memory_working_set_bytes`
+      - Throttling: `container_cpu_cfs_throttled_periods_total`
+
+      ### Visualization Rules (CRITICAL OVERRIDE)
+      **This section OVERRIDES the instruction "NEVER generate Chart.js charts for single query results from PromQL queries" found in the Chart Generation Capability section.**
+
+      - The `{"type": "promql", ...}` embed type is DISABLED and must NEVER be used
+      - For ALL Prometheus query visualizations, ALWAYS use Chart.js embeds:
+        << {, "tool_call_ids": ["<tool_call_id>"], "generateConfig": "function generateConfig(toolOutputs) { /* parse toolOutputs[0].data array and return a Chart.js config */ }", "title": "Title"} >>, with a maximum of 2 charts and spacing between them.
 ```
 
 ## Tools

@@ -14,10 +14,33 @@
 
 mcp_servers:
   grafana:
-    description: "Grafana dashboards, metrics, logs, and alerting"
+    description: "Grafana observability and dashboards"
     config:
       url: "http://grafana-mcp.default.svc.cluster.local:8000/mcp"
       mode: streamable-http
     icon_url: "https://cdn.simpleicons.org/grafana/F46800"
+    # These instructions were tested and produce improved results
     llm_instructions: |
-      Use Grafana to query prometheus dashboards, view visualizations, and explore metrics. Use for dashboard-based troubleshooting and when you need pre-built visualizations.
+      This tool doesnt use promql it uses grafanaql which doesnt work with promql embeds
+      **⚠️ OVERRIDE NOTICE: The following rules SUPERSEDE any conflicting instructions elsewhere in this prompt, including the "Chart Generation Capability" section.**
+
+      ### Tool Requirements
+      - ALWAYS use Grafana tools (e.g., `query_prometheus`) for metrics/PromQL queries
+      - NEVER use `kubectl top` or the `prometheus/metrics` toolset
+
+      ### Query Result Handling
+      - NEVER answer based on truncated query results
+      - If truncation occurs, refine the query with `topk`, `bottomk`, or additional filters until complete
+      - For high-cardinality metrics (>10 series), first check with `count()` if needed, then ALWAYS use `topk(5, <query>)`
+
+      ### Standard Metrics Reference
+      - CPU: `container_cpu_usage_seconds_total`
+      - Memory: `container_memory_working_set_bytes`
+      - Throttling: `container_cpu_cfs_throttled_periods_total`
+
+      ### Visualization Rules (CRITICAL OVERRIDE)
+      **This section OVERRIDES the instruction "NEVER generate Chart.js charts for single query results from PromQL queries" found in the Chart Generation Capability section.**
+
+      - The `{"type": "promql", ...}` embed type is DISABLED and must NEVER be used
+      - For ALL Prometheus query visualizations, ALWAYS use Chart.js embeds:
+        << {, "tool_call_ids": ["<tool_call_id>"], "generateConfig": "function generateConfig(toolOutputs) { /* parse toolOutputs[0].data array and return a Chart.js config */ }", "title": "Title"} >>, with a maximum of 2 charts and spacing between them.
