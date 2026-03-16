@@ -60,7 +60,34 @@ kubectl get pods -l app=grafana-mcp
 
 # Check logs
 kubectl logs -l app=grafana-mcp
+```
 
+## Deprecated: Grafana API Key Authentication
+
+Not all Grafana versions support service accounts. Grafana 9.x and earlier use legacy API keys instead. API keys were deprecated in Grafana 11 and removed in later versions.
+
+If your Grafana instance uses API keys (tokens starting with `eyJ...`), use the deployment in the `api-token/` directory.
+
+| Grafana Version | Auth Method | Deployment |
+|----------------|-------------|------------|
+| 11+ | Service Account Token | `deployment.yaml` |
+| 9.x - 10.x | Either (both supported) | `deployment.yaml` or `api-token/deployment.yaml` |
+| 8.x and earlier | API Key only | `api-token/deployment.yaml` |
+
+First, verify your API key works and can query Prometheus through the datasource proxy:
+
+```bash
+./api-token/test-grafana-api-key.sh '<your-api-key>' '<your-grafana-url>'
+```
+
+Then create the secret and deploy:
+
+```bash
+kubectl create secret generic grafana-mcp-secret \
+  --from-literal=GRAFANA_API_KEY='<your-api-key>' \
+  --from-literal=GRAFANA_URL='<your-grafana-url>'
+
+kubectl apply -f api-token/deployment.yaml
 ```
 
 ## Holmes Integration
