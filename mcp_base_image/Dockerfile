@@ -10,14 +10,21 @@ USER root
 # - tar 7.5.4 → latest (CVE-2026-24842)
 RUN apk upgrade --no-cache
 
-# Update npm to latest version for CVE handling, then patch npm's bundled deps
+# Update npm to latest version for CVE handling, then patch npm's bundled deps:
+# - minimatch, tar: general updates
+# - picomatch (CVE-2026-33671)
+# - brace-expansion (CVE-2026-33750)
 RUN npm install -g npm@latest && \
     cd /tmp && \
-    npm pack minimatch@latest && npm pack tar@latest && \
+    npm pack minimatch@latest && npm pack tar@latest && npm pack picomatch@latest && npm pack brace-expansion@latest && \
     cd /usr/local/lib/node_modules/npm/node_modules/minimatch && \
     tar xzf /tmp/minimatch-*.tgz --strip-components=1 && \
     cd /usr/local/lib/node_modules/npm/node_modules/tar && \
     tar xzf /tmp/tar-*.tgz --strip-components=1 && \
+    cd /usr/local/lib/node_modules/npm/node_modules/tinyglobby/node_modules/picomatch && \
+    tar xzf /tmp/picomatch-*.tgz --strip-components=1 && \
+    cd /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
+    tar xzf /tmp/brace-expansion-*.tgz --strip-components=1 && \
     rm -rf /tmp/*.tgz
 
 # Update vulnerable dependencies in supergateway:
