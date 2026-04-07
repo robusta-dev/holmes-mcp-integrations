@@ -31,9 +31,17 @@ RUN npm install -g npm@latest && \
 # - @modelcontextprotocol/sdk (CVE-2026-25536)
 # - @isaacs/brace-expansion (CVE-2026-25547)
 # - qs (CVE-2025-15284)
+# - cross-spawn (CVE-2024-21538)
 RUN cd /usr/local/lib/node_modules/supergateway && \
     npm install @modelcontextprotocol/sdk@latest @isaacs/brace-expansion@latest qs@latest \
-    minimatch@latest tar@latest && \
+    minimatch@latest tar@latest cross-spawn@latest && \
     sed -i 's/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@[^"]*"/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@latest"/' package.json && \
     npm install && \
     npm audit fix --force || true
+
+# Also update cross-spawn in npm's global node_modules (CVE-2024-21538)
+RUN cd /tmp && npm pack cross-spawn@latest && \
+    for dir in $(find /usr/local/lib/node_modules -name cross-spawn -type d 2>/dev/null); do \
+        tar xzf /tmp/cross-spawn-*.tgz --strip-components=1 -C "$dir" 2>/dev/null || true; \
+    done && \
+    rm -rf /tmp/*.tgz

@@ -1,7 +1,7 @@
 # Azure API MCP Server
 # Builds from source since Microsoft doesn't provide pre-built images
 
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Install git for cloning the repository
 RUN apk add --no-cache git
