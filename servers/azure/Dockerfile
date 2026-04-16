@@ -14,11 +14,16 @@ WORKDIR /azure-api-mcp
 
 # Set GOTOOLCHAIN to auto to handle version requirements
 ENV GOTOOLCHAIN=auto
+# GOGC=off prevents GC crashes when building under QEMU emulation
+ENV GOGC=off
 
 RUN go build -o bin/azure-api-mcp ./cmd/server
 
 # Final stage - minimal image
 FROM alpine:latest
+
+# Fix CVE-2026-22184: upgrade zlib only
+RUN apk add --no-cache --upgrade zlib
 
 # Install ca-certificates for HTTPS connections and Azure CLI for authentication
 RUN apk add --no-cache ca-certificates python3 py3-pip && \
