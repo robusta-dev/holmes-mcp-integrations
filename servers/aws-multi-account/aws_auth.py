@@ -52,6 +52,15 @@ def _assume_role_with_web_identity(sts_client, profile_name: str, role_arn: str,
     )
     return response['Credentials']
 
+def _assume_role(sts_client, profile_name: str, role_arn: str, duration_seconds: int = 3600) -> dict:
+    """Assume IAM role using the ambient credentials available to boto3."""
+    response = sts_client.assume_role(
+        RoleArn=role_arn,
+        RoleSessionName=f"{profile_name}-mcp-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        DurationSeconds=duration_seconds
+    )
+    return response['Credentials']
+
 def _write_credentials_file(credentials_path: str, credentials_lines: list):
     """Write credentials to file with secure permissions (600 = owner read/write only)."""
     with open(credentials_path, 'w') as f:
@@ -86,36 +95,39 @@ def _write_config_file(config_path: str, default_region: str, profile_regions: d
     with open(config_path, 'w') as f:
         f.write('\n'.join(config_lines))
 
-def _process_profiles_to_credentials(config: dict, token: str, default_region: str) -> tuple:
+def _process_profiles_to_credentials(config: dict, token: str | None, default_region: str) -> tuple:
     """
     Process all profiles from config and return credentials file lines and profile regions.
-    
+
     Args:
         config: Configuration dict with 'profiles' key
-        token: Web identity token for assume_role_with_web_identity
+        token: Web identity token for assume_role_with_web_identity (IRSA), or None to use ambient boto3 credentials
         default_region: Default region to use if profile doesn't specify one
-    
+
     Returns:
         Tuple of (credentials_lines, profile_regions_dict)
-    
+
     Raises:
         Exception: If any profile fails to process, logs the problematic profile and raises
     """
     credentials_lines = []
     profile_regions = {}
-    
+
     for profile_name, profile_config in config['profiles'].items():
         try:
             # Use profile-specific region if provided, otherwise use default
             profile_region = profile_config.get('region', default_region)
             profile_regions[profile_name] = profile_region
-            
+
             # Create STS client with profile's region (STS is global but good practice)
             sts_client = boto3.client('sts', region_name=profile_region)
-            
-            creds = _assume_role_with_web_identity(
-                sts_client, profile_name, profile_config['role_arn'], token
-            )
+
+            if token is not None:
+                creds = _assume_role_with_web_identity(
+                    sts_client, profile_name, profile_config['role_arn'], token
+                )
+            else:
+                creds = _assume_role(sts_client, profile_name, profile_config['role_arn'])
             credential_file_lines = _credentials_to_file_lines(profile_name, creds)
             credentials_lines.extend(credential_file_lines)
             
@@ -129,31 +141,42 @@ def _process_profiles_to_credentials(config: dict, token: str, default_region: s
     
     return credentials_lines, profile_regions
 
-def _refresh_credentials(config_path: str, token_path: str, aws_dir: str) -> dict:
+def _refresh_credentials(config_path: str, aws_dir: str) -> dict:
     """
-    Refresh credentials by reading config/token, processing profiles, and writing credentials file.
-    
+    Refresh credentials by reading config, processing profiles, and writing credentials file.
+
+    Determines the auth method from the environment:
+    - If AWS_WEB_IDENTITY_TOKEN_FILE is set, uses IRSA (assume_role_with_web_identity).
+    - Otherwise, falls back to plain assume_role using whatever credentials boto3 finds
+      in its standard chain (instance profile, Pod Identity agent, environment variables, etc.).
+
     Returns:
         Dictionary mapping profile names to their regions
-    
+
     Raises:
         Exception: If any profile fails to process
     """
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-    
-    with open(token_path, 'r') as f:
-        token = f.read().strip()
-    
+
+    web_identity_token_file = os.getenv('AWS_WEB_IDENTITY_TOKEN_FILE')
+    if web_identity_token_file:
+        with open(web_identity_token_file, 'r') as f:
+            token = f.read().strip()
+        logger.debug("Using IRSA (web identity) for credential refresh")
+    else:
+        token = None
+        logger.debug("Using ambient boto3 credentials (plain assume_role) for credential refresh")
+
     default_region = config.get('region', 'us-east-2')
     credentials_path = os.path.join(aws_dir, 'credentials')
-    
+
     credentials_lines, profile_regions = _process_profiles_to_credentials(config, token, default_region)
     _write_credentials_file(credentials_path, credentials_lines)
-    
+
     return profile_regions
 
-def _refresh_loop(config_path, token_path, aws_dir):
+def _refresh_loop(config_path, aws_dir):
     """
     Background thread loop that refreshes credentials periodically.
     Refresh interval is controlled by AWS_REFRESH_CREDENTIALS_SEC environment variable (default: 3000 seconds).
@@ -162,18 +185,21 @@ def _refresh_loop(config_path, token_path, aws_dir):
     while True:
         try:
             time.sleep(AWS_REFRESH_CREDENTIALS_SEC)
-            _refresh_credentials(config_path, token_path, aws_dir)
+            _refresh_credentials(config_path, aws_dir)
         except Exception as e:
             logger.error(f"Error in credential refresh loop (will retry on next interval): {e}", exc_info=True)
 
 def setup_aws_profiles(
     config_path: str = AWS_ACCOUNT_ROLES_FILE,
-    token_path: str = "/var/run/secrets/eks.amazonaws.com/serviceaccount/token",
     aws_dir: str = "/root/.aws"
 ):
     """
     Set up AWS profiles by refreshing credentials and starting background refresh thread.
-    
+
+    Auth method is selected automatically based on environment:
+    - AWS_WEB_IDENTITY_TOKEN_FILE set → IRSA (assume_role_with_web_identity)
+    - AWS_WEB_IDENTITY_TOKEN_FILE not set → plain assume_role using boto3's standard credential chain
+
     _refresh_thread is a module-level global variable to track the background refresh thread.
     It needs to be global because setup_aws_profiles may be called multiple times, and we need
     to ensure only one refresh thread is running at a time.
@@ -196,19 +222,19 @@ def setup_aws_profiles(
     os.makedirs(aws_dir, exist_ok=True)
     
     # Refresh credentials (writes credentials file and returns profile regions)
-    profile_regions = _refresh_credentials(config_path, token_path, aws_dir)
-    
+    profile_regions = _refresh_credentials(config_path, aws_dir)
+
     # Write config file with per-profile regions (only needs to be done once during setup)
     default_region = config.get('region', 'us-east-2')
     config_path_out = os.path.join(aws_dir, 'config')
     _write_config_file(config_path_out, default_region, profile_regions)
-    
+
     logger.info(f"Wrote AWS credentials/config to {aws_dir}")
-    
+
     if _refresh_thread is None or not _refresh_thread.is_alive():
         _refresh_thread = threading.Thread(
             target=_refresh_loop,
-            args=(config_path, token_path, aws_dir),
+            args=(config_path, aws_dir),
             daemon=True
         )
         _refresh_thread.start()
