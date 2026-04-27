@@ -45,3 +45,12 @@ RUN cd /tmp && npm pack cross-spawn@latest && \
         tar xzf /tmp/cross-spawn-*.tgz --strip-components=1 -C "$dir" 2>/dev/null || true; \
     done && \
     rm -rf /tmp/*.tgz
+
+# Fix child process leak in stateless streamableHttp mode.
+# Every POST spawns a stdio child that is never killed after the response
+# completes, leaking memory until OOM. This patch adds res.on('close')
+# to kill the child. Version-pinned — build fails if supergateway changes.
+COPY patch-supergateway-child-leak.sh /tmp/
+RUN chmod +x /tmp/patch-supergateway-child-leak.sh && \
+    /tmp/patch-supergateway-child-leak.sh && \
+    rm /tmp/patch-supergateway-child-leak.sh

@@ -3,7 +3,6 @@
 import logging
 import os
 import shlex
-import subprocess
 import sys
 
 from github_app_auth import setup_github_app_auth
@@ -27,8 +26,10 @@ def main():
         cmd_parts = shlex.split(cmd)
 
         logger.info("Running: %s", cmd)
-        proc = subprocess.Popen(cmd_parts)
-        sys.exit(proc.wait())
+        # exec replaces this process with github-mcp-server — no child,
+        # no zombie. Token refresh thread is unnecessary in stateless mode
+        # since each request spawns a fresh wrapper with a fresh token.
+        os.execvp(cmd_parts[0], cmd_parts)
 
     except Exception as e:
         logger.error("Failed to start: %s", e, exc_info=True)
