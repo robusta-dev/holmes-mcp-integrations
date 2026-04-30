@@ -17,6 +17,9 @@ ENV GOTOOLCHAIN=auto
 # GOGC=off prevents GC crashes when building under QEMU emulation
 ENV GOGC=off
 
+# Force buger/jsonparser>=1.1.2 to fix CVE-2026-32285 (transitive dep)
+RUN go get github.com/buger/jsonparser@v1.1.2 && go mod tidy
+
 RUN go build -o bin/azure-api-mcp ./cmd/server
 
 # Final stage - minimal image

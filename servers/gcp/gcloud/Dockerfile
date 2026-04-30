@@ -27,12 +27,15 @@ RUN curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cl
     rm -rf /root/.gsutil && \
     rm -rf /root/.docker
 
-# Upgrade Python packages to fix CVEs (cryptography, jaraco-context, wheel)
+# Upgrade Python packages to fix CVEs (cryptography, jaraco-context, wheel, pyopenssl)
+# pyopenssl>=26.0.0 fixes CVE-2026-27459
 RUN pip3 install --no-cache-dir --break-system-packages --upgrade \
-    jaraco-context wheel cryptography setuptools pip && \
+    jaraco-context wheel cryptography setuptools pip pyopenssl && \
     rm -rf /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/cryptography* \
            /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/setuptools/_vendor/wheel-*.dist-info \
-           /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/wheel-*.dist-info
+           /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/wheel-*.dist-info \
+           /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/OpenSSL \
+           /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/pyOpenSSL-*.dist-info
 
 # Pre-install the gcloud MCP package to cache it
 RUN npx -y @google-cloud/gcloud-mcp --version || true
