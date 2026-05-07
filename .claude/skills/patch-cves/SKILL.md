@@ -182,8 +182,57 @@ RUN apt-get install -y package-name
 2. Still verify with `docker scout cves` on final image
 3. Update documentation to credit upstream fixes
 
+## Verifying CVEs in Google Artifact Registry (auto-scan results)
 
+After pushing to Artifact Registry, the auto-scan results live in the **Container Analysis API**. Use the snippet below to query them — it works with a normal `gcloud auth login` and does not require extra IAM beyond what push already gave you.
 
-gcloud artifacts docker images list-vulnerabilities \
-us-central1-docker.pkg.dev/genuine-flight-317411/mcp/aws-api-mcp-server@sha256:2bbb327bf704091199a5e72dac5af4e3a18ef9c473e8fd994bd1a46eae7bb2e9 \
---location=us-central1
+```bash
+# Verify a pushed image's CVEs via the Container Analysis API
+# Requires: gcloud auth login, image already pushed (digest known)
+
+IMAGE_DIGEST="us-central1-docker.pkg.dev/<project>/<repo>/<image>@sha256:<digest>"
+PROJECT="<project>"
+
+FILTER=$(python3 -c "import urllib.parse; print(urllib.parse.quote('resourceUrl=\"https://${IMAGE_DIGEST}\" AND kind=\"VULNERABILITY\"'))")
+
+curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://containeranalysis.googleapis.com/v1/projects/${PROJECT}/occurrences?filter=${FILTER}&pageSize=500" \
+  | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+occs = data.get('occurrences', [])
+print(f'Total: {len(occs)}')
+for o in occs:
+    cve = o.get('noteName', '').split('/')[-1]
+    v = o.get('vulnerability', {})
+    sev = v.get('severity', '?')
+    for pi in v.get('packageIssue', []):
+        pkg = pi.get('affectedPackage', '')
+        ver = pi.get('affectedVersion', {}).get('fullName', '')
+        fix = pi.get('fixedVersion', {}).get('fullName', '')
+        paths = [fl.get('filePath') for fl in pi.get('fileLocation', [])]
+        print(f'{sev:8} {cve:25} {pkg:20} {ver} -> {fix} {paths}')
+"
+```
+
+**To filter for one CVE**, append `| grep CVE-XXXX-XXXXX` to the pipeline.
+
+### Why not the obvious gcloud commands
+
+- `gcloud artifacts docker images describe <image> --show-package-vulnerability` requires `roles/serviceusage.serviceUsageConsumer` on the project. Push permission ≠ scan-read permission, so this often 403s for users who can push.
+- `gcloud artifacts docker images list-vulnerabilities` is for **on-demand scans only** — you must run `gcloud artifacts docker images scan ...` first and pass that scan's resource name. It does **not** query the auto-scan that runs after push.
+
+### Gotchas
+
+- Auto-scan results appear ~1–2 min after push; the `resourceUrl` must include the **digest**, not the tag.
+- The scanner reads file metadata, not just OS package DBs. It picks up:
+  - apk/dpkg-tracked OS packages (e.g. `py3-pip`)
+  - Python dist-info under `site-packages/*.dist-info/METADATA`
+  - **Bundled wheels** like `/usr/lib/python3.*/ensurepip/_bundled/pip-*.whl` — these are part of Alpine's `python3` package itself and stay flagged even after `pip install --upgrade pip`. Delete them in the same RUN that bootstraps pip.
+- For Alpine images, the safest pattern for pip CVEs is:
+  ```dockerfile
+  RUN apk add --no-cache python3 && \
+      wget -qO- https://bootstrap.pypa.io/get-pip.py | python3 - --break-system-packages && \
+      rm -f /usr/lib/python3.*/ensurepip/_bundled/pip-*.whl
+  ```
+  This avoids the apk DB entry for `py3-pip` and removes the bundled wheel that ensurepip ships.
