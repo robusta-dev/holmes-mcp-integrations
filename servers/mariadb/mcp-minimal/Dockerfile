@@ -16,11 +16,13 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install Python dependencies.
 # Upgrade setuptools/pip too: their vendored copies of jaraco-context and
 # wheel are flagged as CVE-2026-23949 / CVE-2026-24049.
+# Drop ensurepip's bundled pip wheel (otherwise scanners flag CVE-2025-8869 on the unused bootstrap wheel).
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --upgrade pip setuptools
+    pip install --no-cache-dir --upgrade pip setuptools && \
+    rm -f /usr/local/lib/python3.*/ensurepip/_bundled/pip-*.whl
 
 # Copy server code
 COPY server.py .

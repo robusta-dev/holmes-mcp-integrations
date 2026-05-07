@@ -27,10 +27,12 @@ RUN curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cl
     rm -rf /root/.gsutil && \
     rm -rf /root/.docker
 
-# Upgrade Python packages to fix CVEs (cryptography, jaraco-context, wheel, pyopenssl)
-# pyopenssl>=26.0.0 fixes CVE-2026-27459
+# Upgrade Python packages to fix CVEs (cryptography, jaraco-context, wheel, pyopenssl).
+# pyopenssl>=26.0.0 fixes CVE-2026-27459.
+# Drop ensurepip's bundled pip wheel (otherwise scanners flag CVE-2025-8869 on the unused bootstrap wheel).
 RUN pip3 install --no-cache-dir --break-system-packages --upgrade \
     jaraco-context wheel cryptography setuptools pip pyopenssl && \
+    rm -f /usr/lib/python3.*/ensurepip/_bundled/pip-*.whl && \
     rm -rf /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/cryptography* \
            /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/setuptools/_vendor/wheel-*.dist-info \
            /google-cloud-sdk/platform/bundledpythonunix/lib/python3.*/site-packages/wheel-*.dist-info \

@@ -24,9 +24,11 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Upgrade pip first, then install Python dependencies
+# Upgrade pip first, then install Python dependencies.
+# Drop ensurepip's bundled pip wheel (otherwise scanners flag CVE-2025-8869 on the unused bootstrap wheel).
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    rm -f /usr/local/lib/python3.*/ensurepip/_bundled/pip-*.whl
 
 # Copy server code
 COPY kubernetes_remediation.py .
