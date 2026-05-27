@@ -11,11 +11,15 @@ The AWS MCP server provides Holmes with direct access to AWS APIs through a secu
 ```
 Holmes → Remote MCP (SSE API) → Supergateway Wrapper → AWS MCP Server → AWS APIs
                                         ↓
-                          Running in Kubernetes with IRSA
-                          (IAM Roles for Service Accounts)
+                          Running in Kubernetes
+                          Auth: IRSA (recommended) or AWS Access Keys
 ```
 
-## Quick Start
+## Authentication Options
+
+### Option 1: IRSA (Recommended)
+
+IRSA (IAM Roles for Service Accounts) is the recommended authentication method for EKS clusters. Pods get temporary credentials automatically — no static secrets needed.
 
 ```bash
 # 1. Set up IRSA (one command creates everything)
@@ -27,6 +31,57 @@ helm upgrade --install holmes ./helm/holmes --set mcpAddons.aws.enabled=true
 # 3. Verify it's working
 kubectl get pods -l app=holmes-aws-mcp
 ```
+
+### Option 2: AWS Access Key and Secret
+
+If you cannot use IRSA (e.g., non-EKS Kubernetes, or your cluster doesn't have OIDC configured), you can authenticate with standard AWS access keys. The underlying `awslabs.aws-api-mcp-server` uses boto3 which picks up credentials from environment variables automatically.
+
+#### Step 1: Create a Kubernetes Secret with your AWS credentials
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-mcp-credentials
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE"
+  AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+```
+
+#### Step 2: Set environment variables on the MCP server pod
+
+Pass the credentials as environment variables. The AWS SDK (boto3) will pick them up automatically:
+
+```yaml
+containers:
+  - name: aws-mcp
+    image: us-central1-docker.pkg.dev/genuine-flight-317411/mcp/aws-api-mcp-server:1.0.1
+    env:
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: aws-mcp-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: aws-mcp-credentials
+            key: AWS_SECRET_ACCESS_KEY
+      - name: AWS_REGION
+        value: "us-east-1"
+```
+
+The IAM user should have the same read-only permissions as defined in `aws-mcp-iam-policy.json`.
+
+#### Multiple AWS Accounts
+
+If you need to query multiple AWS accounts, use the [multi-account server](../aws-multi-account/) instead. It supports:
+- **IRSA** with cross-account role assumption
+- **Static credentials + AssumeRole** — one set of keys fans out to multiple accounts
+- **Per-profile static credentials** — separate keys for each account
+
+See the [multi-account README](../aws-multi-account/README.md) for details.
 
 ## Resource Files in This Directory
 
@@ -200,9 +255,9 @@ Container Insights captures:
 ## Security Considerations
 
 - The MCP server has **read-only** access to AWS services
-- IRSA ensures pods use temporary credentials
-- No AWS credentials are stored in the cluster
-- Access is scoped to specific service account
+- **IRSA** (recommended): Pods use temporary credentials, no static secrets stored in the cluster
+- **Access keys**: Credentials are stored in a Kubernetes Secret — ensure RBAC restricts access to the Secret, and rotate keys regularly
+- Access is scoped to specific service account / IAM user
 
 ## Next Steps
 
