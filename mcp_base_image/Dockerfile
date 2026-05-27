@@ -6,7 +6,10 @@ FROM supercorp/supergateway:latest
 USER root
 
 # Upgrade all Alpine packages to fix OS-level CVEs:
-# - openssl 3.5.4 → latest (CVE-2025-15467, CVE-2025-69419, CVE-2025-69420, CVE-2025-69421)
+# - openssl 3.5.4 → 3.5.6 (CVE-2025-15467, CVE-2025-69419, CVE-2025-69420,
+#   CVE-2025-69421, CVE-2026-2673, CVE-2026-31790, CVE-2026-28388,
+#   CVE-2026-28389, CVE-2026-28390)
+# - zlib 1.3.1 → 1.3.2 (CVE-2026-22184)
 # - tar 7.5.4 → latest (CVE-2026-24842)
 RUN apk upgrade --no-cache
 
