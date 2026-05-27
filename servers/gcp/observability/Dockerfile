@@ -6,11 +6,13 @@ FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:late
 # Switch to root to install dependencies
 USER root
 
-# Install minimal dependencies for observability-mcp
+# Install minimal dependencies for observability-mcp.
+# Drop ensurepip's bundled pip wheel (otherwise scanners flag CVE-2025-8869 on the unused bootstrap wheel).
 RUN apk add --no-cache \
     python3 \
     bash \
-    curl
+    curl && \
+    rm -f /usr/lib/python3.*/ensurepip/_bundled/pip-*.whl
 
 # Pre-install the observability MCP package to cache it
 RUN npx -y @google-cloud/observability-mcp --version || true

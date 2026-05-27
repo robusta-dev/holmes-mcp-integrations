@@ -28,11 +28,13 @@ FROM alpine:latest
 # Fix CVE-2026-22184: upgrade zlib only
 RUN apk add --no-cache --upgrade zlib
 
-# Install ca-certificates for HTTPS connections and Azure CLI for authentication
+# Install ca-certificates for HTTPS connections and Azure CLI for authentication.
+# Drop ensurepip's bundled pip wheel (otherwise scanners flag CVE-2025-8869 on the unused bootstrap wheel).
 RUN apk add --no-cache ca-certificates python3 py3-pip && \
     pip3 install --break-system-packages azure-cli && \
     pip3 install --no-cache-dir --break-system-packages --upgrade \
     jaraco-context wheel cryptography setuptools pip && \
+    rm -f /usr/lib/python3.*/ensurepip/_bundled/pip-*.whl && \
     ln -sf /usr/bin/python3 /usr/bin/python
 
 # Copy the built binary from builder stage
