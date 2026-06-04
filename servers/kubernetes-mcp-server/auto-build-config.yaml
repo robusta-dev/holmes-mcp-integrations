@@ -1,0 +1,2 @@
+image: kubernetes-mcp-server
+version: "v0.0.61-oauth-cve1"
