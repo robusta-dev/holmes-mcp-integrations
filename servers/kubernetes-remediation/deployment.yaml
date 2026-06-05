@@ -17,30 +17,42 @@ spec:
       serviceAccountName: kubernetes-remediation-mcp-sa
       containers:
       - name: mcp-server
-        image: me-west1-docker.pkg.dev/robusta-development/development/kubernetes-remediation:1.0.3
+        image: me-west1-docker.pkg.dev/robusta-development/development/kubernetes-remediation:1.1.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
           name: http
           protocol: TCP
         env:
-        # Allowed kubectl subcommands (comma-separated)
-        # Includes remediation commands by default
+        # Hard verb allowlist for the approval-gated run_kubectl_command fallback
         - name: KUBECTL_ALLOWED_COMMANDS
-          value: "get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate"
+          value: "edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec"
 
         # Dangerous flags that are always blocked
         - name: KUBECTL_DANGEROUS_FLAGS
           value: "--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid"
 
+        # Pre-approved read-only commands for run_preapproved_kubectl_command (auto-approved)
+        - name: KUBECTL_PREAPPROVED_COMMANDS
+          value: "exec * -- ps*,exec * -- top*,exec * -- df*,exec * -- ls*,exec * -- netstat*,exec * -- ss*"
+
+        # Pre-approved troubleshooting images for run_diagnostic_image (auto-approved)
+        - name: KUBECTL_DIAGNOSTIC_IMAGES
+          value: "nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1"
+
+        # read_file_from_container path policy (allow roots minus secret/token mounts)
+        - name: KUBECTL_FILE_READ_ALLOWED_PATHS
+          value: "/"
+        - name: KUBECTL_FILE_READ_DENIED_PATHS
+          value: "/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/"
+
+        # Enable the approval-gated fallback (set to "false" for a fully locked-down mode)
+        - name: KUBECTL_ALLOW_ARBITRARY_COMMANDS
+          value: "true"
+
         # Command timeout in seconds
         - name: KUBECTL_TIMEOUT
           value: "60"
-
-        # Allowed images for run_image tool (empty = disabled)
-        # Uncomment and configure to enable run_image tool
-        # - name: KUBECTL_ALLOWED_IMAGES
-        #   value: "curlimages/curl,busybox,alpine,python:3.11-slim"
 
         - name: LOG_LEVEL
           value: "INFO"

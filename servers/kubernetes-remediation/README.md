@@ -1,321 +1,159 @@
 # Kubernetes Remediation MCP Server
 
-An MCP server that allows running kubectl commands safely for Kubernetes remediation tasks. It runs as a pod inside a Kubernetes cluster, relying on RBAC for namespace and resource restrictions.
+An MCP server that lets HolmesGPT **diagnose and act** on a cluster beyond what
+the agent pod's own limited RBAC allows — read files/processes it can't reach,
+run diagnostic pods, and remediate (mutate) the cluster. It runs as a pod inside
+the cluster and relies on its ServiceAccount's RBAC for resource-level
+restrictions.
 
-## Overview
+## Design principles
 
-This MCP server provides Holmes with the ability to execute kubectl commands for investigating and remediating Kubernetes issues. The server implements multiple layers of security:
+1. **Diagnose *and* act** beyond the agent pod's RBAC.
+2. **Approval legibility through tool separation.** Each tool is *either* always
+   auto-approved *or* always approval-gated. The model never guesses — the split
+   is encoded in the tool set, not in hidden per-command logic.
+3. **Plug-and-play.** Sensible default image/command/path allowlists ship in the
+   box; enabling the addon works with zero further config.
+4. **Safe by construction.** Nothing mutates without a human; reads can't touch
+   secret mounts; RBAC is least-privilege (no `cluster-admin`); ingress is locked
+   to HolmesGPT.
 
-1. **Subcommand allowlist** - Only explicitly allowed kubectl subcommands can be executed
-2. **Dangerous flags blocklist** - Flags that could bypass security are blocked
-3. **Shell metacharacter rejection** - Defense in depth against injection attacks
-4. **Image allowlist** - For the `run_image` tool, only pre-approved images can be used
-5. **RBAC** - Kubernetes native access control for namespace/resource restrictions
-6. **Timeout** - Prevents hanging commands from consuming resources
+### Responsibility split
 
-## Architecture
+All **policy** lives here in the server: the command/image/path allowlists, the
+arbitrary-command toggle, the hard verb allowlist, and the flag blocklist.
+HolmesGPT only maps **tool name → approval** (`approval_required_tools`) and
+carries the LLM instructions. The agent core stays free of command-parsing logic.
 
-```
-Holmes -> Remote MCP (HTTP) -> Kubernetes Remediation MCP Server -> kubectl -> Kubernetes API
-                                          |
-                          Running in Kubernetes with ServiceAccount
-                          (RBAC controls what kubectl can access)
-```
+## Tool taxonomy
+
+### Auto-approved tools (read-only / data-gathering — never prompt)
+
+| Tool | What it does | Enforced by |
+|------|--------------|-------------|
+| `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy — secret/token mounts always denied. |
+| `run_preapproved_kubectl_command` | Run a kubectl command from the read-only diagnostics allowlist (`exec ... -- ps/top/df/ls/netstat/ss`). | Command allowlist (prefix/glob). |
+| `run_diagnostic_image` | Launch a short-lived pod from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag). |
+| `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
+
+`run_preapproved_kubectl_command` deliberately excludes `cat` (use
+`read_file_from_container`) and `env` (leaks secrets).
+
+### Approval-gated fallback (always prompts a human)
+
+| Tool | What it does | Gated by |
+|------|--------------|----------|
+| `run_kubectl_command` | Catch-all for everything not pre-approved: all mutations, arbitrary exec, non-allowlisted images via `kubectl run`, etc. | HolmesGPT `approval_required_tools` **plus** the server guards below. |
+
+Server guards on `run_kubectl_command` (defense in depth, independent of approval):
+
+- **Hard verb allowlist** (`KUBECTL_ALLOWED_COMMANDS`).
+- **Flag blocklist** (`KUBECTL_DANGEROUS_FLAGS`) + `--overrides`.
+- **Shell-metacharacter rejection** (`; | & $ \` \ ' " ` and newlines); `shell=False`.
+- **Timeout** (`KUBECTL_TIMEOUT`).
+- **`KUBECTL_ALLOW_ARBITRARY_COMMANDS`**: when `false`, this tool is disabled —
+  a fully locked-down mode where only the auto-approved tools function.
+
+### Tool → approval summary
+
+| Tool | Mutating | Approval | Enforced where |
+|------|----------|----------|----------------|
+| `read_file_from_container` | No | Auto | server path policy |
+| `run_preapproved_kubectl_command` | No | Auto | server command allowlist |
+| `run_diagnostic_image` | No (data-gathering pod) | Auto | server image allowlist |
+| `get_remediation_mcp_config` | No | Auto | — |
+| `run_kubectl_command` | Yes | **Human approval** | HolmesGPT `approval_required_tools` + server guards |
+
+## Configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `KUBECTL_ALLOWED_COMMANDS` | `edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec` | Hard verb allowlist for `run_kubectl_command` |
+| `KUBECTL_DANGEROUS_FLAGS` | `--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid` | Blocked flags |
+| `KUBECTL_PREAPPROVED_COMMANDS` | `exec * -- ps*,exec * -- top*,exec * -- df*,exec * -- ls*,exec * -- netstat*,exec * -- ss*` | `run_preapproved_kubectl_command` allowlist |
+| `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_diagnostic_image` allowlist |
+| `KUBECTL_FILE_READ_ALLOWED_PATHS` | `/` | `read_file_from_container` allow roots |
+| `KUBECTL_FILE_READ_DENIED_PATHS` | `/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/` | secret-mount denylist |
+| `KUBECTL_ALLOW_ARBITRARY_COMMANDS` | `true` | enable the approval-gated fallback |
+| `KUBECTL_TIMEOUT` | `60` | per-command timeout (s) |
+| `LOG_LEVEL` | `INFO` | logging |
+
+The diagnostic image allowlist matches on the **repository**; the server runs the
+pinned tag from the allowlist, so callers can just name the repo
+(`run_diagnostic_image(image="nicolaka/netshoot", ...)`).
 
 ## Quick Start
 
 ```bash
 # 1. Build the Docker image
-docker build -t kubernetes-remediation-mcp:latest .
+docker build -t kubernetes-remediation-mcp:1.1.0 .
 
-# 2. Deploy RBAC resources
+# 2. Deploy the scoped RBAC (ServiceAccount + ClusterRole + binding, no cluster-admin)
 kubectl apply -f rbac.yaml
 
-# 3. Deploy the MCP server
+# 3. Deploy the MCP server (and optionally lock ingress to HolmesGPT)
 kubectl apply -f deployment.yaml
 kubectl apply -f service.yaml
+kubectl apply -f networkpolicy.yaml
 
 # 4. Verify it's running
 kubectl get pods -l app=kubernetes-remediation-mcp
 ```
 
-## Tools
+## RBAC
 
-### 1. `kubectl`
+`rbac.yaml` ships a **scoped, least-privilege `ClusterRole`** — not
+`cluster-admin`. It is cluster-scoped because node operations require it, and
+`secrets` is intentionally absent (defense in depth on top of the file-read
+denylist). For stricter or namespaced setups, replace it with your own
+`Role`/`ClusterRole`.
 
-Execute a kubectl command with validated arguments.
+## NetworkPolicy
 
-**Parameters:**
-- `args: list[str]` - Command arguments, e.g. `["get", "pods", "-n", "default"]`
+`networkpolicy.yaml` is ingress-only and locks inbound traffic to HolmesGPT
+(`app: holmes`). It restricts only ingress, so it can never break the MCP
+server → apiserver path. It is inert where the CNI doesn't enforce
+NetworkPolicy. Verify the HolmesGPT pod label matches your deployment before
+relying on enforcement.
 
-**Example calls:**
-```json
-{"args": ["get", "pods", "-n", "production"]}
-{"args": ["describe", "pod", "my-pod", "-n", "default"]}
-{"args": ["logs", "my-pod", "-c", "sidecar", "--tail", "100"]}
-{"args": ["delete", "pod", "stuck-pod", "-n", "staging"]}
-```
-
-**Returns:**
-```json
-{"success": true, "stdout": "...", "stderr": "", "return_code": 0}
-```
-
-### 2. `run_image`
-
-Run a pod with a pre-approved image. This tool is disabled by default and requires configuring `KUBECTL_ALLOWED_IMAGES`.
-
-**Parameters:**
-- `name: str` - Pod name (required)
-- `image: str` - Image to run, must be in allowed list (required)
-- `namespace: str` - Optional namespace
-- `command: list[str]` - Optional command to run in container
-- `rm: bool` - Delete pod after exit (default: true)
-
-**Example calls:**
-```json
-{"name": "debug", "image": "alpine", "command": ["sh", "-c", "cat /etc/resolv.conf"]}
-{"name": "curl-test", "image": "curlimages/curl", "command": ["curl", "-s", "http://my-service"]}
-```
-
-### 3. `get_config`
-
-Get the current configuration of the MCP server for debugging purposes.
-
-**Returns:**
-```json
-{
-  "allowed_commands": ["annotate", "cordon", "delete", "describe", "drain", "edit", "get", "label", "logs", "patch", "rollout", "scale", "taint", "uncordon"],
-  "dangerous_flags": ["--kubeconfig", "--context", "..."],
-  "timeout_seconds": 60,
-  "allowed_images": ["alpine", "busybox"],
-  "run_image_enabled": true
-}
-```
-
-## Configuration
-
-Configure the server using environment variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `KUBECTL_ALLOWED_COMMANDS` | Comma-separated list of allowed subcommands | `get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate` |
-| `KUBECTL_DANGEROUS_FLAGS` | Comma-separated list of blocked flags | `--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid` |
-| `KUBECTL_TIMEOUT` | Command timeout in seconds | `60` |
-| `KUBECTL_ALLOWED_IMAGES` | Comma-separated list of allowed images for `run_image` | (empty = tool disabled) |
-| `LOG_LEVEL` | Logging level | `INFO` |
-
-### Example Configurations
-
-**Full remediation (default):**
-```yaml
-- name: KUBECTL_ALLOWED_COMMANDS
-  value: "get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate"
-```
-
-**Read-only (restricted):**
-```yaml
-- name: KUBECTL_ALLOWED_COMMANDS
-  value: "get,describe,logs"
-```
-
-**With debug images:**
-```yaml
-- name: KUBECTL_ALLOWED_COMMANDS
-  value: "get,describe,logs,edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run"
-- name: KUBECTL_ALLOWED_IMAGES
-  value: "curlimages/curl,busybox,alpine,nicolaka/netshoot"
-```
-
-## Security
-
-### Why These Security Measures
-
-| Measure | Protects Against |
-|---------|------------------|
-| `shell=False` | Shell injection (`;`, `\|`, `$()`, etc.) |
-| Subcommand allowlist | Unauthorized operations |
-| Dangerous flags block | Credential/context hijacking |
-| Shell char rejection | Defense in depth |
-| Image allowlist | Running malicious containers |
-| No `--overrides` flag | Privilege escalation via pod spec |
-| Timeout | Hanging commands consuming resources |
-| RBAC (cluster-side) | Namespace/resource access control |
-
-### Blocked Flags
-
-The following flags are always blocked:
-- `--kubeconfig` - Could point to different cluster config
-- `--context` - Could switch to different cluster/user
-- `--cluster` - Could target different cluster
-- `--user` - Could impersonate different user
-- `--token` - Could use different credentials
-- `--as` / `--as-group` / `--as-uid` - Impersonation
-- `--overrides` - Could escalate privileges via pod spec
-
-### Shell Metacharacters
-
-Even though `shell=False` is used, these characters are rejected as defense in depth:
-```
-; | & $ ` \ ' " \n \r
-```
-
-## RBAC Configuration
-
-The MCP server relies on Kubernetes RBAC for access control. The `rbac.yaml` file provides the necessary permissions for all default remediation commands.
-
-### Default Permissions
-
-The default RBAC configuration supports all remediation commands:
-
-| Command | Required RBAC Permissions |
-|---------|---------------------------|
-| `get`, `describe`, `logs` | `get`, `list`, `watch` on resources |
-| `edit`, `patch` | `patch`, `update` on resources |
-| `delete` | `delete` on resources |
-| `scale` | `patch`, `update` on `deployments/scale`, `statefulsets/scale`, `replicasets/scale` |
-| `rollout` | `patch`, `update` on deployments, daemonsets, statefulsets |
-| `cordon`, `uncordon`, `taint` | `patch`, `update` on nodes |
-| `drain` | `patch` on nodes, `delete` on pods, `create` on pods/eviction |
-| `label`, `annotate` | `patch`, `update` on various resources |
-
-### Restricting to Read-Only
-
-To restrict to read-only operations, use the commented read-only ClusterRole in `rbac.yaml` and update the allowed commands:
-
-```yaml
-- name: KUBECTL_ALLOWED_COMMANDS
-  value: "get,describe,logs"
-```
-
-### Namespace Scoping
-
-For restricted access to specific namespaces, use `Role` and `RoleBinding` instead of `ClusterRole` and `ClusterRoleBinding`. See the commented examples in `rbac.yaml`.
-
-## Deployment
-
-### Building the Image
-
-```bash
-# Build locally
-docker build -t kubernetes-remediation-mcp:latest .
-
-# Build and push to registry
-docker build -t your-registry/kubernetes-remediation-mcp:1.0.0 .
-docker push your-registry/kubernetes-remediation-mcp:1.0.0
-```
-
-### Deploying to Kubernetes
-
-1. Update the image in `deployment.yaml` to your registry
-
-2. Apply the RBAC resources:
-```bash
-kubectl apply -f rbac.yaml
-```
-
-3. Deploy the server:
-```bash
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
-```
-
-4. Verify:
-```bash
-kubectl get pods -l app=kubernetes-remediation-mcp
-kubectl logs -l app=kubernetes-remediation-mcp
-```
-
-## Holmes Integration
-
-Configure Holmes to use the MCP server:
+## Holmes integration
 
 ```yaml
 mcp_servers:
-  kubernetes-remediation:
-    description: "Kubernetes remediation tools for cluster operations"
+  kubernetes_remediation:
+    description: "Kubernetes remediation & deep diagnostics — execute kubectl and run diagnostic pods"
     config:
       url: "http://kubernetes-remediation-mcp.default.svc.cluster.local:8000/mcp"
       mode: streamable-http
+    approval_required_tools:
+      - "run_kubectl_command"
 ```
 
-## Testing Locally
+Only the mutating fallback (`run_kubectl_command`) is listed under
+`approval_required_tools` — the four read-only tools run immediately.
 
-### Without Kubernetes (Limited)
+## Testing
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Unit tests for the policy/validator logic (no cluster needed)
+pip install -r requirements.txt pytest
+pytest test_kubernetes_remediation.py
 
-# Use default remediation commands (or customize)
-export KUBECTL_TIMEOUT="30"
-
-# Run the server
+# Run the server locally (HTTP transport)
 python kubernetes_remediation.py --transport http --host 0.0.0.0 --port 8000
 ```
-
-### Test with curl
-
-```bash
-# List tools
-curl -X POST http://localhost:8000/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}'
-
-# Get config
-curl -X POST http://localhost:8000/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "get_config", "arguments": {}}, "id": 2}'
-```
-
-## Troubleshooting
-
-### MCP Server Not Responding
-
-```bash
-# Check pod status
-kubectl get pods -l app=kubernetes-remediation-mcp
-kubectl describe pod -l app=kubernetes-remediation-mcp
-
-# Check logs
-kubectl logs -l app=kubernetes-remediation-mcp
-```
-
-### Permission Denied Errors
-
-```bash
-# Verify ServiceAccount is attached
-kubectl get pod <pod-name> -o yaml | grep serviceAccount
-
-# Test RBAC manually
-kubectl auth can-i get pods --as=system:serviceaccount:default:kubernetes-remediation-mcp-sa
-
-# Check ClusterRoleBinding
-kubectl describe clusterrolebinding kubernetes-remediation-mcp-binding
-```
-
-### Command Not Allowed
-
-Check the `KUBECTL_ALLOWED_COMMANDS` environment variable and add the required command.
 
 ## File Structure
 
 ```
 kubernetes-remediation/
-├── kubernetes_remediation.py   # Main MCP server
-├── requirements.txt            # Python dependencies
-├── Dockerfile                  # Container image
-├── deployment.yaml             # Kubernetes Deployment
-├── service.yaml                # Kubernetes Service
-├── rbac.yaml                   # RBAC configuration
-└── README.md                   # This file
+├── kubernetes_remediation.py        # MCP server
+├── test_kubernetes_remediation.py   # Unit tests (policy/validators)
+├── requirements.txt                 # Python dependencies
+├── Dockerfile                       # Container image
+├── deployment.yaml                  # Deployment + ConfigMap env
+├── service.yaml                     # Service
+├── networkpolicy.yaml               # Ingress-only NetworkPolicy
+├── rbac.yaml                        # Scoped ServiceAccount/ClusterRole/binding
+└── README.md                        # This file
 ```
-
-## Security Recommendations
-
-1. **Use namespace-scoped RBAC** - Limit access to specific namespaces when possible instead of cluster-wide
-2. **Audit logging** - Enable Kubernetes audit logging to track all API calls made by the service account
-3. **Network policies** - Restrict network access to the MCP server pod
-4. **Image scanning** - If using `run_image`, only allow scanned and approved images
-5. **Regular review** - Periodically review RBAC permissions and allowed commands
-6. **Restrict if needed** - For read-only use cases, set `KUBECTL_ALLOWED_COMMANDS=get,describe,logs`
