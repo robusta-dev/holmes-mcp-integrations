@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: mcp-server
-        image: ghcr.io/sooperset/mcp-atlassian:latest
+        image: us-central1-docker.pkg.dev/genuine-flight-317411/mcp/mcp-atlassian:v0.21.2.1
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
