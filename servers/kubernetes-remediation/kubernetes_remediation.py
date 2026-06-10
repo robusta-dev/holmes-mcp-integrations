@@ -34,6 +34,7 @@ Defense in depth (independent of approval):
 
 import os
 import subprocess
+import json
 import logging
 import posixpath
 import uuid
@@ -130,6 +131,18 @@ TIMEOUT = int(os.getenv("KUBECTL_TIMEOUT", "60"))
 # Shell metacharacters to reject (defense in depth even though shell=False).
 SHELL_CHARS = set(";|&$`\\'\"\n\r")
 
+# Pseudo-filesystem roots that are NEVER readable, regardless of the configured
+# allow/deny lists (not operator-removable). The configured deny list is a
+# string-prefix filter on the requested path; these roots are how that filter
+# can be routed around, so they are blocked unconditionally:
+#   /proc  -> /proc/<pid>/environ leaks env-injected secrets, and
+#             /proc/<pid>/root/... reaches a secret mount by a path that is not
+#             string-prefixed by any deny entry.
+#   /sys   -> kernel/device internals.
+#   /dev   -> raw devices (e.g. /dev/mem).
+# None of these hold application source code, so blocking them costs nothing.
+HARD_DENIED_PATHS = ["/proc", "/sys", "/dev"]
+
 
 # Create MCP server
 mcp = FastMCP(name="kubernetes-remediation", version="1.1.0")
@@ -176,6 +189,25 @@ def _run_kubectl(args: List[str]) -> Dict[str, Any]:
 def _reject_shell_chars(value: str, field: str) -> None:
     if any(c in value for c in SHELL_CHARS):
         raise ValueError(f"Invalid characters in {field}: {value!r}")
+
+
+def _validate_identifier(value: str, field: str) -> None:
+    """
+    Validate a positional/option-value identifier (pod, namespace, container,
+    pod name) that the auto-approved tools hand to kubectl.
+
+    Beyond rejecting shell metacharacters, this rejects any value that begins
+    with '-': kubectl would parse such a value as a flag rather than a
+    positional, which is a flag-injection vector (e.g. pod="--kubeconfig=...")
+    in tools that build their own kubectl invocation. The verb-based fallback
+    (validate_kubectl_args) blocks flags via DANGEROUS_FLAGS instead; the
+    dedicated tools have no legitimate use for a leading-'-' identifier at all.
+    """
+    _reject_shell_chars(value, field)
+    if value.startswith("-"):
+        raise ValueError(
+            f"Invalid {field}: must not start with '-' (possible flag injection): {value!r}"
+        )
 
 
 def validate_kubectl_args(args: List[str]) -> List[str]:
@@ -265,30 +297,75 @@ def _path_is_under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def validate_read_path(path: str) -> str:
+def _enforce_read_policy(candidate: str, original: str) -> None:
     """
-    Validate a file path against the allow/deny policy.
-
-    A path is readable iff it is under some allowedPaths entry and under no
-    deniedPaths entry. Denied wins ties. Raises ValueError naming the matched
-    deny rule on refusal.
+    Enforce the read policy on an already-absolute path: hard-denied
+    pseudo-filesystems, then the configured deny list, then the allow list.
+    Denied wins ties. `original` is the user-supplied path, used in messages.
+    Raises ValueError on refusal.
     """
-    normalized = _normalize_path(path)
-
-    for denied in FILE_READ_DENIED_PATHS:
-        if _path_is_under(normalized, denied):
+    for hard in HARD_DENIED_PATHS:
+        if _path_is_under(candidate, hard):
             raise ValueError(
-                f"Path '{path}' is restricted: it is under the denied path '{denied}'. "
-                f"Secret and token mounts cannot be read."
+                f"Path '{original}' is restricted: it resolves under '{hard}', a system "
+                f"pseudo-filesystem that can expose secrets, env vars, or devices."
             )
 
-    if not any(_path_is_under(normalized, allowed) for allowed in FILE_READ_ALLOWED_PATHS):
+    for denied in FILE_READ_DENIED_PATHS:
+        if _path_is_under(candidate, denied):
+            raise ValueError(
+                f"Path '{original}' is restricted: it resolves under the denied path "
+                f"'{denied}'. Secret and token mounts cannot be read."
+            )
+
+    if not any(_path_is_under(candidate, allowed) for allowed in FILE_READ_ALLOWED_PATHS):
         raise ValueError(
-            f"Path '{path}' is not under any allowed root. "
+            f"Path '{original}' is not under any allowed root. "
             f"Allowed roots: {', '.join(FILE_READ_ALLOWED_PATHS)}."
         )
 
+
+def validate_read_path(path: str) -> str:
+    """
+    Validate a requested file path against the allow/deny policy.
+
+    This checks the *literal* path. Symlinks are resolved and re-checked
+    separately, inside the container, by read_file_from_container (the canonical
+    target can only be known there). Raises ValueError on refusal.
+    """
+    normalized = _normalize_path(path)
+    _enforce_read_policy(normalized, path)
     return normalized
+
+
+def _resolve_symlink_in_container(
+    namespace: str, pod: str, container: Optional[str], path: str
+) -> Optional[str]:
+    """
+    Best-effort: return the canonical path of `path` inside the container via
+    `readlink -f`, or None if it can't be resolved (e.g. the container has no
+    `readlink`). `path` is already validated to be absolute, so it cannot be
+    parsed by readlink as a flag.
+    """
+    args = ["exec", pod, "-n", namespace]
+    if container:
+        args.extend(["-c", container])
+    args.extend(["--", "readlink", "-f", path])
+    try:
+        result = subprocess.run(
+            ["kubectl"] + args,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
+    except Exception as e:  # never let resolution failure crash the read
+        logger.debug(f"symlink resolution failed for {path!r}: {e}")
+        return None
+    if result.returncode == 0:
+        canonical = result.stdout.strip()
+        return canonical or None
+    return None
 
 
 def match_preapproved_command(args: List[str]) -> bool:
@@ -305,12 +382,14 @@ def match_preapproved_command(args: List[str]) -> bool:
     name="read_file_from_container",
     description=(
         "AUTO-APPROVED (runs immediately, no human needed). Read a single file "
-        "from inside a running container — useful for config files, logs on disk, "
-        "and process/runtime files the agent's own pod cannot reach.\n\n"
-        "The `path` is validated against the server's path policy BEFORE execution: "
-        "it must be under an allowed root and under no denied root (secret/token "
-        "mounts such as /var/run/secrets/ are always denied). Denied paths return a "
-        "structured refusal naming the matched rule.\n\n"
+        "from inside a running container — useful for config files and on-disk "
+        "logs the agent's own pod cannot reach.\n\n"
+        "The `path` is validated against the server's path policy BEFORE execution "
+        "and symlinks are resolved and re-checked inside the container: it must be "
+        "under an allowed root and under no denied root. Secret/token mounts "
+        "(/var/run/secrets/, /run/secrets/) and the /proc, /sys, /dev "
+        "pseudo-filesystems are always denied. Denied paths return a structured "
+        "refusal naming the matched rule.\n\n"
         "Do NOT use this server for `get`/`describe`/`logs` — the built-in Kubernetes "
         "tools are faster and need no approval.\n\n"
         "Example: read_file_from_container(namespace=\"prod\", pod=\"api-xxx\", path=\"/app/config.yaml\")"
@@ -335,14 +414,27 @@ def read_file_from_container(
         Dictionary with success status, stdout (file contents), stderr
     """
     try:
-        _reject_shell_chars(namespace, "namespace")
-        _reject_shell_chars(pod, "pod")
+        _validate_identifier(namespace, "namespace")
+        _validate_identifier(pod, "pod")
         if container:
-            _reject_shell_chars(container, "container")
+            _validate_identifier(container, "container")
         validated_path = validate_read_path(path)
     except ValueError as e:
         logger.warning(f"read_file_from_container validation failed: {e}")
         return {"success": False, "error": str(e)}
+
+    # Defense in depth against symlink routing around the path policy: resolve
+    # the path inside the container and re-check the canonical target. A symlink
+    # under an allowed root can otherwise point at a denied path (e.g. a secret
+    # mount). Best-effort — if the container has no `readlink`, we fall back to
+    # the literal-path checks above plus the hard /proc,/sys,/dev denial.
+    canonical = _resolve_symlink_in_container(namespace, pod, container, validated_path)
+    if canonical and canonical != validated_path and canonical.startswith("/"):
+        try:
+            _enforce_read_policy(posixpath.normpath(canonical), path)
+        except ValueError as e:
+            logger.warning(f"read_file_from_container refused after symlink resolution: {e}")
+            return {"success": False, "error": str(e)}
 
     exec_args = ["exec", pod, "-n", namespace]
     if container:
@@ -431,13 +523,15 @@ def run_diagnostic_image(
         Dictionary with success status, stdout, stderr
     """
     try:
-        _reject_shell_chars(namespace, "namespace")
+        _validate_identifier(namespace, "namespace")
         resolved_image = resolve_diagnostic_image(image)
         if command:
+            # Command tokens run inside the diagnostic container (after `--`), so
+            # leading '-' is legitimate here (e.g. curl -s); only block shell chars.
             for part in command:
                 _reject_shell_chars(part, "command")
         if name:
-            _reject_shell_chars(name, "name")
+            _validate_identifier(name, "name")
             pod_name = name
         else:
             image_base = _image_repository(image).split("/")[-1].lower()
@@ -447,6 +541,30 @@ def run_diagnostic_image(
         logger.warning(f"run_diagnostic_image refused: {e}")
         return {"success": False, "error": str(e)}
 
+    # Harden the short-lived diagnostic pod without crippling network tooling.
+    # We control this override (not the caller), so it is safe to use here even
+    # though --overrides is blocked on the approval-gated fallback:
+    #   - automountServiceAccountToken: false  removes API access the pod never
+    #     needs (a real escalation vector) and does not affect net/DNS/HTTP probes.
+    #   - allowPrivilegeEscalation: false       blocks setuid escalation.
+    #   - memory limit + requests                cap node impact; NO cpu limit so
+    #     throughput tests (iperf) aren't throttled, and capabilities are left
+    #     untouched so tcpdump/ping still work.
+    overrides = {
+        "spec": {
+            "automountServiceAccountToken": False,
+            "containers": [
+                {
+                    "name": pod_name,
+                    "securityContext": {"allowPrivilegeEscalation": False},
+                    "resources": {
+                        "requests": {"cpu": "50m", "memory": "64Mi"},
+                        "limits": {"memory": "256Mi"},
+                    },
+                }
+            ],
+        }
+    }
     run_args = [
         "run",
         pod_name,
@@ -456,6 +574,9 @@ def run_diagnostic_image(
         "-i",
         "-n",
         namespace,
+        "--override-type=strategic",
+        "--overrides",
+        json.dumps(overrides),
     ]
     if command:
         run_args.append("--command")

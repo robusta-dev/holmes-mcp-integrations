@@ -31,9 +31,9 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 
 | Tool | What it does | Enforced by |
 |------|--------------|-------------|
-| `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy — secret/token mounts always denied. |
+| `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied. |
 | `run_preapproved_kubectl_command` | Run a kubectl command from the read-only diagnostics allowlist (`exec ... -- ps/top/df/ls/netstat/ss`). | Command allowlist (prefix/glob). |
-| `run_diagnostic_image` | Launch a short-lived pod from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag). |
+| `run_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag). |
 | `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
 
 `run_preapproved_kubectl_command` deliberately excludes `cat` (use

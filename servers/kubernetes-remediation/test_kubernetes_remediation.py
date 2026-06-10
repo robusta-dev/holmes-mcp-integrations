@@ -9,6 +9,7 @@ PATH or not.
 Run with:  pytest servers/kubernetes-remediation/test_kubernetes_remediation.py
 """
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -32,9 +33,25 @@ def test_read_path_denies_secret_mounts(path):
     assert "restricted" in str(exc.value)
 
 
-@pytest.mark.parametrize("path", ["/app/config.yaml", "/etc/hosts", "/proc/1/status"])
+@pytest.mark.parametrize("path", ["/app/config.yaml", "/etc/hosts", "/data/app.log"])
 def test_read_path_allows_normal_paths(path):
     assert k.validate_read_path(path) == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/proc/1/environ",  # env-injected secrets
+        "/proc/1/status",
+        "/proc/1/root/var/run/secrets/kubernetes.io/serviceaccount/token",  # token via /proc/root
+        "/sys/kernel/foo",
+        "/dev/mem",
+    ],
+)
+def test_read_path_hard_denies_pseudo_filesystems(path):
+    with pytest.raises(ValueError) as exc:
+        k.validate_read_path(path)
+    assert "pseudo-filesystem" in str(exc.value)
 
 
 def test_read_path_rejects_traversal():
@@ -56,7 +73,8 @@ def test_read_path_denied_wins_when_under_allowed():
 
 
 def test_read_file_invokes_cat_with_validated_path():
-    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
+    with patch.object(k, "_resolve_symlink_in_container", return_value=None), \
+         patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
         k.read_file_from_container(namespace="prod", pod="api-1", path="/app/config.yaml")
     m.assert_called_once_with(
         ["exec", "api-1", "-n", "prod", "--", "cat", "/app/config.yaml"]
@@ -64,13 +82,53 @@ def test_read_file_invokes_cat_with_validated_path():
 
 
 def test_read_file_with_container():
-    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
+    with patch.object(k, "_resolve_symlink_in_container", return_value=None), \
+         patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
         k.read_file_from_container(
             namespace="prod", pod="api-1", container="sidecar", path="/etc/hosts"
         )
     m.assert_called_once_with(
         ["exec", "api-1", "-n", "prod", "-c", "sidecar", "--", "cat", "/etc/hosts"]
     )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"namespace": "prod", "pod": "--kubeconfig=/tmp/evil.yaml", "path": "/app/c.yaml"},
+        {"namespace": "--as=system:masters", "pod": "api", "path": "/app/c.yaml"},
+        {"namespace": "prod", "pod": "api", "container": "-c", "path": "/app/c.yaml"},
+    ],
+)
+def test_read_file_rejects_flag_injection(kwargs):
+    with patch.object(k, "_run_kubectl") as m:
+        result = k.read_file_from_container(**kwargs)
+    m.assert_not_called()
+    assert result["success"] is False
+    assert "flag injection" in result["error"]
+
+
+def test_read_file_refuses_when_symlink_resolves_into_denied_path():
+    # Literal path is allowed, but readlink -f reveals it points at a secret mount.
+    with patch.object(
+        k,
+        "_resolve_symlink_in_container",
+        return_value="/var/run/secrets/kubernetes.io/serviceaccount/token",
+    ), patch.object(k, "_run_kubectl") as m:
+        result = k.read_file_from_container(
+            namespace="prod", pod="api", path="/app/linked-token"
+        )
+    m.assert_not_called()  # cat is never executed
+    assert result["success"] is False
+    assert "symlink" in result["error"].lower() or "restricted" in result["error"]
+
+
+def test_read_file_reads_when_symlink_resolves_into_allowed_path():
+    with patch.object(
+        k, "_resolve_symlink_in_container", return_value="/data/real-config.yaml"
+    ), patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
+        k.read_file_from_container(namespace="prod", pod="api", path="/app/config.yaml")
+    m.assert_called_once()  # canonical target allowed -> cat runs on the literal path
 
 
 def test_read_file_denied_path_does_not_execute():
@@ -178,9 +236,37 @@ def test_diagnostic_image_runs_pinned_and_cleans_up():
     assert any(c[:3] == ["kubectl", "delete", "pod"] for c in calls)
 
 
+def test_diagnostic_image_is_hardened_without_losing_capabilities():
+    with patch.object(k, "_run_kubectl", return_value={"success": True}) as run_mock, \
+         patch.object(k.subprocess, "run", return_value=None):
+        k.run_diagnostic_image(image="nicolaka/netshoot", namespace="prod", name="probe")
+
+    run_args = run_mock.call_args[0][0]
+    assert "--overrides" in run_args
+    overrides = json.loads(run_args[run_args.index("--overrides") + 1])
+    spec = overrides["spec"]
+    # API access removed; setuid escalation blocked.
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["containers"][0]["securityContext"]["allowPrivilegeEscalation"] is False
+    # Memory is capped but NO cpu limit (so iperf isn't throttled); caps untouched
+    # (so tcpdump/ping still work) -> no runAsNonRoot / capability drops here.
+    limits = spec["containers"][0]["resources"]["limits"]
+    assert "memory" in limits and "cpu" not in limits
+    assert "capabilities" not in spec["containers"][0]["securityContext"]
+
+
 def test_diagnostic_image_unlisted_does_not_execute():
     with patch.object(k, "_run_kubectl") as m:
         result = k.run_diagnostic_image(image="evil/image", namespace="prod")
+    m.assert_not_called()
+    assert result["success"] is False
+
+
+def test_diagnostic_image_rejects_flag_injection_in_name():
+    with patch.object(k, "_run_kubectl") as m:
+        result = k.run_diagnostic_image(
+            image="busybox", namespace="prod", name="--privileged"
+        )
     m.assert_not_called()
     assert result["success"] is False
 
