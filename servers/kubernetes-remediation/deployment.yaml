@@ -36,7 +36,7 @@ spec:
         - name: KUBECTL_PREAPPROVED_COMMANDS
           value: "exec * -- ps*,exec * -- top*,exec * -- df*,exec * -- ls*,exec * -- netstat*,exec * -- ss*"
 
-        # Pre-approved troubleshooting images for run_diagnostic_image (auto-approved)
+        # Pre-approved troubleshooting images for run_preapproved_diagnostic_image (auto-approved)
         - name: KUBECTL_DIAGNOSTIC_IMAGES
           value: "nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1"
 

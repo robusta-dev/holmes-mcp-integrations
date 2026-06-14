@@ -14,7 +14,7 @@ is encoded in the tool set, never guessed per-command:
   Auto-approved (read-only / data-gathering, never prompt):
     - read_file_from_container          (path allow/deny policy)
     - run_preapproved_kubectl_command   (read-only command allowlist)
-    - run_diagnostic_image              (troubleshooting image allowlist)
+    - run_preapproved_diagnostic_image              (troubleshooting image allowlist)
     - get_remediation_mcp_config        (effective policy, debugging)
 
   Approval-gated (mutations / arbitrary exec — HolmesGPT always prompts a human):
@@ -103,7 +103,7 @@ PREAPPROVED_COMMANDS = _split_csv(
     )
 )
 
-# Pre-approved read-only troubleshooting images for run_diagnostic_image.
+# Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
 DIAGNOSTIC_IMAGES = _split_csv(
     os.getenv(
@@ -491,7 +491,7 @@ def run_preapproved_kubectl_command(args: List[str]) -> Dict[str, Any]:
 
 
 @mcp.tool(
-    name="run_diagnostic_image",
+    name="run_preapproved_diagnostic_image",
     description=(
         "AUTO-APPROVED (runs immediately, no human needed). Launch a short-lived pod "
         "from a pre-approved read-only troubleshooting image to gather data the agent "
@@ -501,10 +501,10 @@ def run_preapproved_kubectl_command(args: List[str]) -> Dict[str, Any]:
         "nslookup, iperf), busybox (ls, cat, ps, wget, nslookup), curlimages/curl "
         "(HTTP/endpoint reachability). A non-allowlisted image returns a structured "
         "refusal listing the allowed images and pointing to run_kubectl_command.\n\n"
-        "Example: run_diagnostic_image(image=\"nicolaka/netshoot\", namespace=\"prod\", command=[\"dig\",\"my-svc\"])"
+        "Example: run_preapproved_diagnostic_image(image=\"nicolaka/netshoot\", namespace=\"prod\", command=[\"dig\",\"my-svc\"])"
     ),
 )
-def run_diagnostic_image(
+def run_preapproved_diagnostic_image(
     image: str,
     namespace: str,
     command: Optional[List[str]] = None,
@@ -538,7 +538,7 @@ def run_diagnostic_image(
             image_base = "".join(c if c.isalnum() else "-" for c in image_base)[:20]
             pod_name = f"k8s-remediation-{image_base}-{uuid.uuid4().hex[:8]}"
     except ValueError as e:
-        logger.warning(f"run_diagnostic_image refused: {e}")
+        logger.warning(f"run_preapproved_diagnostic_image refused: {e}")
         return {"success": False, "error": str(e)}
 
     # Harden the short-lived diagnostic pod without crippling network tooling.

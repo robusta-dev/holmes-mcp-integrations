@@ -33,7 +33,7 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 |------|--------------|-------------|
 | `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied. |
 | `run_preapproved_kubectl_command` | Run a kubectl command from the read-only diagnostics allowlist (`exec ... -- ps/top/df/ls/netstat/ss`). | Command allowlist (prefix/glob). |
-| `run_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag). |
+| `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag). |
 | `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
 
 `run_preapproved_kubectl_command` deliberately excludes `cat` (use
@@ -60,7 +60,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 |------|----------|----------|----------------|
 | `read_file_from_container` | No | Auto | server path policy |
 | `run_preapproved_kubectl_command` | No | Auto | server command allowlist |
-| `run_diagnostic_image` | No (data-gathering pod) | Auto | server image allowlist |
+| `run_preapproved_diagnostic_image` | No (data-gathering pod) | Auto | server image allowlist |
 | `get_remediation_mcp_config` | No | Auto | — |
 | `run_kubectl_command` | Yes | **Human approval** | HolmesGPT `approval_required_tools` + server guards |
 
@@ -71,7 +71,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `KUBECTL_ALLOWED_COMMANDS` | `edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec` | Hard verb allowlist for `run_kubectl_command` |
 | `KUBECTL_DANGEROUS_FLAGS` | `--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid` | Blocked flags |
 | `KUBECTL_PREAPPROVED_COMMANDS` | `exec * -- ps*,exec * -- top*,exec * -- df*,exec * -- ls*,exec * -- netstat*,exec * -- ss*` | `run_preapproved_kubectl_command` allowlist |
-| `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_diagnostic_image` allowlist |
+| `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_preapproved_diagnostic_image` allowlist |
 | `KUBECTL_FILE_READ_ALLOWED_PATHS` | `/` | `read_file_from_container` allow roots |
 | `KUBECTL_FILE_READ_DENIED_PATHS` | `/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/` | secret-mount denylist |
 | `KUBECTL_ALLOW_ARBITRARY_COMMANDS` | `true` | enable the approval-gated fallback |
@@ -80,7 +80,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 
 The diagnostic image allowlist matches on the **repository**; the server runs the
 pinned tag from the allowlist, so callers can just name the repo
-(`run_diagnostic_image(image="nicolaka/netshoot", ...)`).
+(`run_preapproved_diagnostic_image(image="nicolaka/netshoot", ...)`).
 
 ## Quick Start
 

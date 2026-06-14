@@ -191,7 +191,7 @@ def test_preapproved_blocks_dangerous_flags():
     assert result["success"] is False
 
 
-# ── run_diagnostic_image ─────────────────────────────────────────────────────
+# ── run_preapproved_diagnostic_image ─────────────────────────────────────────────────────
 
 def test_diagnostic_image_repo_match_resolves_pinned_tag():
     assert k.resolve_diagnostic_image("nicolaka/netshoot") == "nicolaka/netshoot:v0.13"
@@ -225,7 +225,7 @@ def test_diagnostic_image_runs_pinned_and_cleans_up():
 
     with patch.object(k, "_run_kubectl", return_value={"success": True}) as run_mock, \
          patch.object(k.subprocess, "run", side_effect=fake_run):
-        k.run_diagnostic_image(
+        k.run_preapproved_diagnostic_image(
             image="nicolaka/netshoot", namespace="prod", command=["dig", "svc"], name="probe"
         )
 
@@ -239,7 +239,7 @@ def test_diagnostic_image_runs_pinned_and_cleans_up():
 def test_diagnostic_image_is_hardened_without_losing_capabilities():
     with patch.object(k, "_run_kubectl", return_value={"success": True}) as run_mock, \
          patch.object(k.subprocess, "run", return_value=None):
-        k.run_diagnostic_image(image="nicolaka/netshoot", namespace="prod", name="probe")
+        k.run_preapproved_diagnostic_image(image="nicolaka/netshoot", namespace="prod", name="probe")
 
     run_args = run_mock.call_args[0][0]
     assert "--overrides" in run_args
@@ -257,14 +257,14 @@ def test_diagnostic_image_is_hardened_without_losing_capabilities():
 
 def test_diagnostic_image_unlisted_does_not_execute():
     with patch.object(k, "_run_kubectl") as m:
-        result = k.run_diagnostic_image(image="evil/image", namespace="prod")
+        result = k.run_preapproved_diagnostic_image(image="evil/image", namespace="prod")
     m.assert_not_called()
     assert result["success"] is False
 
 
 def test_diagnostic_image_rejects_flag_injection_in_name():
     with patch.object(k, "_run_kubectl") as m:
-        result = k.run_diagnostic_image(
+        result = k.run_preapproved_diagnostic_image(
             image="busybox", namespace="prod", name="--privileged"
         )
     m.assert_not_called()
