@@ -4,26 +4,26 @@ This directory contains resources for deploying the AWS API MCP (Model Context P
 
 ## Overview
 
-The AWS MCP server provides Holmes with direct access to AWS APIs through a secure, read-only interface. The server is packaged as a Docker container using Supergateway to expose the stdio-based AWS MCP as an SSE (Server-Sent Events) API, making it accessible as a remote MCP server within Kubernetes.
+The AWS MCP server provides Holmes with direct access to AWS APIs through a secure, read-only interface. The `awslabs.aws-api-mcp-server` package serves the MCP **Streamable HTTP** transport natively (no Supergateway/Node bridge); a thin `wrapper.py` first sets up per-account AWS profiles via IRSA and keeps their credentials refreshed. It is reachable as a remote MCP server within Kubernetes at `http://<service>:8000/mcp`.
 
 ## Architecture
 
 ```
-Holmes → Remote MCP (SSE API) → Supergateway Wrapper → AWS MCP Server → AWS APIs
-                                        ↓
-                          Running in Kubernetes with IRSA
-                          (IAM Roles for Service Accounts)
+Holmes → Remote MCP (Streamable HTTP, /mcp) → wrapper.py (per-account profiles) → AWS MCP Server → AWS APIs
+                                  ↓
+                    Running in Kubernetes with IRSA
+                    (IAM Roles for Service Accounts)
 ```
 
 ## Resource Files in This Directory
 
 ### Core Files
 
-- **`Dockerfile`** - Wraps the stdio-based AWS MCP server with Supergateway to expose it as an SSE API service
-  - Base image: `supercorp/supergateway:latest` (provides SSE API wrapper)
-  - Installs Python and the `awslabs.aws-api-mcp-server` package
-  - Exposes port 8000 for remote MCP connections
-  - Converts stdio interface to HTTP SSE API for remote access
+- **`Dockerfile`** - Runs the AWS MCP server (via `wrapper.py`) with its native MCP Streamable HTTP transport
+  - Base image: `python:3.13-alpine` (no Supergateway/Node)
+  - Installs the `awslabs.aws-api-mcp-server` package (+ `boto3`/`pyyaml` for `wrapper.py`)
+  - Exposes port 8000 and serves Streamable HTTP at `/mcp`
+  - `wrapper.py` sets up per-account profiles, then launches the server (transport configured via `AWS_API_MCP_*` env)
 
 - **`aws-mcp-iam-policy.json`** - Comprehensive IAM policy with read-only permissions for AWS services
   - Covers: CloudWatch, EC2, EKS, ECS, RDS, S3, IAM, Cost Management, and more
@@ -155,20 +155,20 @@ aws sts assume-role-with-web-identity \
 
 The AWS SDK will automatically handle this when configured with the correct role ARN.
 
-### 4. Docker Image - SSE API Wrapper
+### 4. Docker Image - Native Streamable HTTP
 
-The AWS MCP server is originally a stdio-based tool. To make it accessible as a remote MCP server in Kubernetes, we wrap it with Supergateway, which converts stdio communication to an SSE (Server-Sent Events) API.
+The `awslabs.aws-api-mcp-server` package serves the MCP Streamable HTTP transport natively, so the image runs it directly (via `wrapper.py`) — no Supergateway/Node bridge. This removes the Node CVE surface and avoids supergateway's SSE single-session crash, and lets one process serve multiple concurrent Holmes sessions.
 
 **Pre-built image available at:**
 ```
-us-central1-docker.pkg.dev/genuine-flight-317411/mcp/aws-api-mcp-server:1.0.1
+us-central1-docker.pkg.dev/genuine-flight-317411/mcp/multi-aws-api-mcp-server:2.1.0
 ```
 
 **How the Docker image works:**
-1. Uses `supercorp/supergateway:latest` as base (provides SSE API wrapper)
-2. Installs Python and the AWS MCP server package
-3. Supergateway exposes the stdio interface as HTTP SSE on port 8000
-4. This allows Holmes to connect to it as a remote MCP server
+1. Uses `python:3.13-alpine` as base (no Supergateway/Node)
+2. Installs the AWS MCP server package (+ `boto3`/`pyyaml` for `wrapper.py`)
+3. `wrapper.py` sets up per-account profiles, then runs the server with `AWS_API_MCP_TRANSPORT=streamable-http`, serving `/mcp` on port 8000
+4. Holmes connects to it as a remote MCP server at `http://<service>:8000/mcp`
 
 **To build your own:**
 ```bash
