@@ -3,11 +3,14 @@
 
 FROM python:3.11-slim
 
-# Install only essential system dependencies
+# Install only essential system dependencies.
+# Also explicitly upgrade libc6 / libc-bin so the image picks up the patched
+# glibc 2.41-12+deb13u3 (CVE-2026-4046 — iconv IBM1390/IBM1399 crash).
 RUN apt-get update && apt-get install -y \
     gcc \
     default-libmysqlclient-dev \
     pkg-config \
+    && apt-get install -y --only-upgrade libc6 libc-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
