@@ -17,6 +17,26 @@ def _mask_token(token: str) -> str:
     return f"{token[:4]}...{token[-4:]}"
 
 
+def _get_api_base() -> str:
+    """Derive the GitHub REST API base URL from the GITHUB_HOST env var.
+
+    Mirrors how github-mcp-server resolves hosts:
+    - unset / github.com / api.github.com  -> https://api.github.com
+    - *.ghe.com (GHE.com / data residency) -> https://api.<host>
+    - any other host (GHES)                 -> https://<host>/api/v3
+    """
+    host = (os.environ.get("GITHUB_HOST") or "").strip()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.strip("/").lower()
+
+    if not host or host in ("github.com", "www.github.com", "api.github.com"):
+        return "https://api.github.com"
+    if host.endswith(".ghe.com"):
+        return f"https://{host}" if host.startswith("api.") else f"https://api.{host}"
+    return f"https://{host}/api/v3"
+
+
 def _generate_jwt(app_id: str, private_key: str) -> str:
     now = int(time.time())
     payload = {
@@ -29,7 +49,7 @@ def _generate_jwt(app_id: str, private_key: str) -> str:
 
 def _exchange_jwt_for_token(encoded_jwt: str, installation_id: str) -> dict:
     response = requests.post(
-        f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+        f"{_get_api_base()}/app/installations/{installation_id}/access_tokens",
         headers={
             "Authorization": f"Bearer {encoded_jwt}",
             "Accept": "application/vnd.github+json",
