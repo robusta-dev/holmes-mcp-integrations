@@ -1,0 +1,28 @@
+# Ingress-only NetworkPolicy: lock inbound traffic to HolmesGPT.
+#
+# Inert where the CNI doesn't enforce NetworkPolicy. It restricts only ingress,
+# so it can never break the MCP server -> apiserver path (no egress rules).
+#
+# NOTE: `app: holmes` is the HolmesGPT pod label in the Helm chart. Verify it
+# matches your deployment before relying on enforcement — a wrong selector would
+# block HolmesGPT -> MCP on an enforcing CNI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubernetes-remediation-mcp-network-policy
+  labels:
+    app: kubernetes-remediation-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app: kubernetes-remediation-mcp
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: holmes
+      ports:
+        - protocol: TCP
+          port: 8000
