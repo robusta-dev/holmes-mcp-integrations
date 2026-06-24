@@ -38,7 +38,6 @@ import json
 import logging
 import posixpath
 import uuid
-from fnmatch import fnmatch
 from typing import Any, Dict, List, Optional
 import sys
 import uvicorn
@@ -94,14 +93,41 @@ DANGEROUS_FLAGS = set(
 )
 
 # Read-only diagnostic commands that run immediately (no human approval).
-# Matched (prefix/glob) against the joined command. Deliberately excludes
-# `cat` (use read_file_from_container) and `env` (leaks secrets).
+# Each entry is a `kubectl exec <target> [flags] -- <binary>` diagnostic; only
+# the in-container <binary> is allowlisted (matching is structural, see
+# match_preapproved_command — NOT a glob over the joined command). Deliberately
+# excludes `cat` (use read_file_from_container) and `env` (leaks secrets).
 PREAPPROVED_COMMANDS = _split_csv(
     os.getenv(
         "KUBECTL_PREAPPROVED_COMMANDS",
         "exec * -- ps*,exec * -- top*,exec * -- df*,exec * -- ls*,exec * -- netstat*,exec * -- ss*",
     )
 )
+
+
+def _preapproved_exec_binaries(patterns: List[str]) -> set:
+    """
+    Derive the set of allowlisted in-container binaries from the configured
+    `exec ... -- <binary>` patterns.
+
+    The preapproved path only auto-approves `kubectl exec ... -- <binary> [args]`
+    diagnostics. From each pattern we take the token after the `--` separator and
+    strip a trailing glob `*`, yielding the bare binary name (`exec * -- ps*` ->
+    `ps`). Patterns that are not of this exec shape are ignored — they simply
+    never auto-approve (fail safe to the approval-gated path).
+    """
+    binaries = set()
+    for pattern in patterns:
+        tokens = pattern.split()
+        if not tokens or tokens[0] != "exec" or "--" not in tokens:
+            continue
+        rest = tokens[tokens.index("--") + 1:]
+        if rest and rest[0]:
+            binaries.add(rest[0].rstrip("*"))
+    return binaries
+
+
+PREAPPROVED_EXEC_BINARIES = _preapproved_exec_binaries(PREAPPROVED_COMMANDS)
 
 # Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
@@ -369,9 +395,31 @@ def _resolve_symlink_in_container(
 
 
 def match_preapproved_command(args: List[str]) -> bool:
-    """True if the joined command matches one of the pre-approved patterns."""
-    joined = " ".join(args)
-    return any(fnmatch(joined, pattern) for pattern in PREAPPROVED_COMMANDS)
+    """
+    True only for `kubectl exec <target> [flags] -- <binary> [args...]` where
+    <binary> is on the preapproved read-only allowlist.
+
+    Matching is structural, NOT a glob over the joined args. An earlier version
+    joined the args and `fnmatch`-ed them against patterns like `exec * -- ps*`;
+    because glob `*` translates to a greedy `.*` that spans spaces and the `--`
+    separator, an arbitrary command could hide before a trailing allowlisted
+    token — e.g. `exec pod -- rm -rf / -- ps` matched `exec * -- ps*` and ran
+    `rm -rf /` auto-approved. We parse the structure instead and only ever look
+    at the binary immediately after the FIRST `--`.
+    """
+    if not args or args[0] != "exec":
+        return False
+    if "--" not in args:
+        return False
+    # In-container argv, after the FIRST separator.
+    cmd = args[args.index("--") + 1:]
+    # A second `--` would let a real command hide after the allowlisted binary.
+    if not cmd or "--" in cmd:
+        return False
+    # Only the binary (argv[0]) is checked: its trailing args cannot start a new
+    # process (shell=False, single separator). Exact match also blocks lookalikes
+    # such as `psql` that a `ps*` prefix glob would have allowed.
+    return cmd[0] in PREAPPROVED_EXEC_BINARIES
 
 
 # ─────────────────────────────────────────────────────────────────────────────
