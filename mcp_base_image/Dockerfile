@@ -6,12 +6,27 @@ FROM supercorp/supergateway:latest
 USER root
 
 # Upgrade all Alpine packages to fix OS-level CVEs:
-# - openssl 3.5.4 → 3.5.6 (CVE-2025-15467, CVE-2025-69419, CVE-2025-69420,
-#   CVE-2025-69421, CVE-2026-2673, CVE-2026-31790, CVE-2026-28388,
-#   CVE-2026-28389, CVE-2026-28390)
+# - openssl 3.5.6 → 3.5.7-r0 (CVE-2026-34180, CVE-2026-34181, CVE-2026-34182,
+#   CVE-2026-34183, CVE-2026-42764, CVE-2026-45445, CVE-2026-45447,
+#   CVE-2026-7383, CVE-2026-9076)
 # - zlib 1.3.1 → 1.3.2 (CVE-2026-22184)
 # - tar 7.5.4 → latest (CVE-2026-24842)
 RUN apk upgrade --no-cache
+
+# Replace the bundled Node.js binary (20.19.5) with 20.20.2 to fix
+# CVE-2025-55130, CVE-2025-55131, CVE-2025-59465, CVE-2025-59466 and
+# CVE-2026-21637 (fixed in 20.20.0) plus CVE-2026-21710 (fixed in 20.20.2).
+# Upstream supergateway still ships 20.19.5, so swap the musl binary in place.
+RUN NODE_VERSION=20.20.2 && \
+    case "$(apk --print-arch)" in \
+        x86_64)  NODE_ARCH=x64 ;; \
+        aarch64) NODE_ARCH=arm64 ;; \
+        *) echo "unsupported arch: $(apk --print-arch)" && exit 1 ;; \
+    esac && \
+    wget -qO /tmp/node.tar.gz "https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}-musl.tar.gz" && \
+    tar -xzf /tmp/node.tar.gz -C /usr/local/bin --strip-components=2 "node-v${NODE_VERSION}-linux-${NODE_ARCH}-musl/bin/node" && \
+    rm /tmp/node.tar.gz && \
+    node --version
 
 # Update npm to latest version for CVE handling, then patch npm's bundled deps:
 # - minimatch, tar: general updates
@@ -35,9 +50,10 @@ RUN npm install -g npm@latest && \
 # - @isaacs/brace-expansion (CVE-2026-25547)
 # - qs (CVE-2025-15284)
 # - cross-spawn (CVE-2024-21538)
+# - esbuild 0.27.7 → 0.28.1 (GHSA-gv7w-rqvm-qjhr)
 RUN cd /usr/local/lib/node_modules/supergateway && \
     npm install @modelcontextprotocol/sdk@latest @isaacs/brace-expansion@latest qs@latest \
-    minimatch@latest tar@latest cross-spawn@latest && \
+    minimatch@latest tar@latest cross-spawn@latest esbuild@latest && \
     sed -i 's/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@[^"]*"/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@latest"/' package.json && \
     npm install && \
     npm audit fix --force || true
