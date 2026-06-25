@@ -98,40 +98,11 @@ DANGEROUS_FLAGS = set(
 # itself, so only the bare binary name is configured — no patterns, no wildcards.
 # Deliberately excludes `cat` (use read_file_from_container) and `env` (leaks
 # secrets).
-DEFAULT_PREAPPROVED_EXEC_BINARIES = ("ps", "top", "df", "ls", "netstat", "ss")
-
-
-def _preapproved_exec_binaries_from_env() -> set:
-    """Resolve the in-container binary allowlist from the environment.
-
-    Prefers the current `KUBECTL_PREAPPROVED_EXEC_BINARIES` (comma-separated bare
-    binary names). Falls back, with a deprecation warning, to the previous
-    `KUBECTL_PREAPPROVED_COMMANDS` glob patterns (`exec * -- ps*`) by extracting
-    the binary token after the `--` and stripping a trailing `*`.
-    """
-    explicit = os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES")
-    if explicit is not None:
-        return set(_split_csv(explicit))
-
-    legacy = os.getenv("KUBECTL_PREAPPROVED_COMMANDS")
-    if legacy is not None:
-        logger.warning(
-            "KUBECTL_PREAPPROVED_COMMANDS is deprecated and will be removed; "
-            "use KUBECTL_PREAPPROVED_EXEC_BINARIES (comma-separated binary names)."
-        )
-        binaries = set()
-        for pattern in _split_csv(legacy):
-            tokens = pattern.split()
-            if "--" in tokens:
-                rest = tokens[tokens.index("--") + 1:]
-                if rest and rest[0]:
-                    binaries.add(rest[0].rstrip("*"))
-        return binaries
-
-    return set(DEFAULT_PREAPPROVED_EXEC_BINARIES)
-
-
-PREAPPROVED_EXEC_BINARIES = _preapproved_exec_binaries_from_env()
+PREAPPROVED_EXEC_BINARIES = set(
+    _split_csv(
+        os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss")
+    )
+)
 
 # Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
