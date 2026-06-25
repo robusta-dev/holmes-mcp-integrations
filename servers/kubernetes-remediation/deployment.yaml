@@ -32,9 +32,10 @@ spec:
         - name: KUBECTL_DANGEROUS_FLAGS
           value: "--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid"
 
-        # Pre-approved read-only commands for run_preapproved_kubectl_command (auto-approved)
-        - name: KUBECTL_PREAPPROVED_COMMANDS
-          value: "exec * -- ps*,exec * -- top*,exec * -- df*,exec * -- ls*,exec * -- netstat*,exec * -- ss*"
+        # Pre-approved read-only in-container binaries for
+        # run_preapproved_kubectl_exec_command (auto-approved)
+        - name: KUBECTL_PREAPPROVED_EXEC_BINARIES
+          value: "ps,top,df,ls,netstat,ss"
 
         # Pre-approved troubleshooting images for run_preapproved_diagnostic_image (auto-approved)
         - name: KUBECTL_DIAGNOSTIC_IMAGES

@@ -13,8 +13,8 @@ is encoded in the tool set, never guessed per-command:
 
   Auto-approved (read-only / data-gathering, never prompt):
     - read_file_from_container          (path allow/deny policy)
-    - run_preapproved_kubectl_command   (read-only command allowlist)
-    - run_preapproved_diagnostic_image              (troubleshooting image allowlist)
+    - run_preapproved_kubectl_exec_command  (read-only in-container binary allowlist)
+    - run_preapproved_diagnostic_image      (troubleshooting image allowlist)
     - get_remediation_mcp_config        (effective policy, debugging)
 
   Approval-gated (mutations / arbitrary exec — HolmesGPT always prompts a human):
@@ -92,42 +92,17 @@ DANGEROUS_FLAGS = set(
     )
 )
 
-# Read-only diagnostic commands that run immediately (no human approval).
-# Each entry is a `kubectl exec <target> [flags] -- <binary>` diagnostic; only
-# the in-container <binary> is allowlisted (matching is structural, see
-# match_preapproved_command — NOT a glob over the joined command). Deliberately
-# excludes `cat` (use read_file_from_container) and `env` (leaks secrets).
-PREAPPROVED_COMMANDS = _split_csv(
-    os.getenv(
-        "KUBECTL_PREAPPROVED_COMMANDS",
-        "exec * -- ps*,exec * -- top*,exec * -- df*,exec * -- ls*,exec * -- netstat*,exec * -- ss*",
+# Read-only diagnostic binaries that may run inside a container via
+# `run_preapproved_kubectl_exec_command` (auto-approved, no human approval). The
+# server builds `kubectl exec <pod> -n <ns> [-c <container>] -- <binary> [args]`
+# itself, so only the bare binary name is configured — no patterns, no wildcards.
+# Deliberately excludes `cat` (use read_file_from_container) and `env` (leaks
+# secrets).
+PREAPPROVED_EXEC_BINARIES = set(
+    _split_csv(
+        os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss")
     )
 )
-
-
-def _preapproved_exec_binaries(patterns: List[str]) -> set:
-    """
-    Derive the set of allowlisted in-container binaries from the configured
-    `exec ... -- <binary>` patterns.
-
-    The preapproved path only auto-approves `kubectl exec ... -- <binary> [args]`
-    diagnostics. From each pattern we take the token after the `--` separator and
-    strip a trailing glob `*`, yielding the bare binary name (`exec * -- ps*` ->
-    `ps`). Patterns that are not of this exec shape are ignored — they simply
-    never auto-approve (fail safe to the approval-gated path).
-    """
-    binaries = set()
-    for pattern in patterns:
-        tokens = pattern.split()
-        if not tokens or tokens[0] != "exec" or "--" not in tokens:
-            continue
-        rest = tokens[tokens.index("--") + 1:]
-        if rest and rest[0]:
-            binaries.add(rest[0].rstrip("*"))
-    return binaries
-
-
-PREAPPROVED_EXEC_BINARIES = _preapproved_exec_binaries(PREAPPROVED_COMMANDS)
 
 # Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
@@ -394,32 +369,19 @@ def _resolve_symlink_in_container(
     return None
 
 
-def match_preapproved_command(args: List[str]) -> bool:
-    """
-    True only for `kubectl exec <target> [flags] -- <binary> [args...]` where
-    <binary> is on the preapproved read-only allowlist.
+def is_preapproved_exec_command(command: List[str]) -> bool:
+    """True if `command` (the in-container argv) is an allowlisted read-only diagnostic.
 
-    Matching is structural, NOT a glob over the joined args. An earlier version
-    joined the args and `fnmatch`-ed them against patterns like `exec * -- ps*`;
-    because glob `*` translates to a greedy `.*` that spans spaces and the `--`
-    separator, an arbitrary command could hide before a trailing allowlisted
-    token — e.g. `exec pod -- rm -rf / -- ps` matched `exec * -- ps*` and ran
-    `rm -rf /` auto-approved. We parse the structure instead and only ever look
-    at the binary immediately after the FIRST `--`.
+    `command` is exactly the argv that runs *inside* the container; the pod,
+    namespace, and container are separate, server-controlled parameters of
+    run_preapproved_kubectl_exec_command, and the server is the only thing that
+    writes the `kubectl exec ... --` boundary. There is therefore no `--` to
+    parse and nowhere to hide a second command before a trailing allowlisted
+    token — the bypass class the earlier joined-glob matcher allowed. Only the
+    binary (argv[0]) is checked, and exactly (so `psql` ≠ `ps`); its trailing
+    args cannot start a new process (shell=False).
     """
-    if not args or args[0] != "exec":
-        return False
-    if "--" not in args:
-        return False
-    # In-container argv, after the FIRST separator.
-    cmd = args[args.index("--") + 1:]
-    # A second `--` would let a real command hide after the allowlisted binary.
-    if not cmd or "--" in cmd:
-        return False
-    # Only the binary (argv[0]) is checked: its trailing args cannot start a new
-    # process (shell=False, single separator). Exact match also blocks lookalikes
-    # such as `psql` that a `ps*` prefix glob would have allowed.
-    return cmd[0] in PREAPPROVED_EXEC_BINARIES
+    return bool(command) and command[0] in PREAPPROVED_EXEC_BINARIES
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -492,50 +454,68 @@ def read_file_from_container(
 
 
 @mcp.tool(
-    name="run_preapproved_kubectl_command",
+    name="run_preapproved_kubectl_exec_command",
     description=(
-        "AUTO-APPROVED (runs immediately, no human needed). Run a kubectl command "
-        "from the operator's pre-approved read-only diagnostics allowlist (e.g. "
-        "`exec ... -- ps/top/df/ls/netstat/ss`). Reach for this before the "
-        "approval-gated fallback.\n\n"
-        "If the command does not match the allowlist you get a structured refusal "
-        "telling you to use run_kubectl_command (which requires human approval). "
-        "To read a file use read_file_from_container instead of `cat`.\n\n"
-        "Example: run_preapproved_kubectl_command(args=[\"exec\",\"api-xxx\",\"-n\",\"prod\",\"--\",\"ps\",\"aux\"])"
+        "AUTO-APPROVED (runs immediately, no human needed). Run one of the "
+        "operator's pre-approved read-only diagnostic binaries INSIDE a container "
+        "via `kubectl exec` (e.g. ps/top/df/ls/netstat/ss). Pass the pod, "
+        "namespace, optional container, and the in-container command as a list; "
+        "the server builds the `kubectl exec ... -- <command>` invocation itself.\n\n"
+        "Only the command's binary (command[0]) needs to be on the allowlist; if "
+        "it isn't you get a structured refusal telling you to use "
+        "run_kubectl_command (which requires human approval). To read a file use "
+        "read_file_from_container instead of `cat`.\n\n"
+        "Example: run_preapproved_kubectl_exec_command(pod=\"api-xxx\", namespace=\"prod\", command=[\"ps\",\"aux\"])"
     ),
 )
-def run_preapproved_kubectl_command(args: List[str]) -> Dict[str, Any]:
+def run_preapproved_kubectl_exec_command(
+    pod: str,
+    command: List[str],
+    namespace: str = "default",
+    container: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Run a kubectl command from the pre-approved read-only allowlist.
+    Run a pre-approved read-only diagnostic command inside a container.
+
+    The server owns the `kubectl exec ... --` boundary: pod/namespace/container
+    are separate, validated parameters, so a caller cannot smuggle a second
+    command or a fake separator into the invocation.
 
     Args:
-        args: Command arguments, e.g. ["exec", "api-xxx", "-n", "prod", "--", "ps", "aux"]
+        pod: Pod name (required)
+        command: In-container argv, e.g. ["ps", "aux"]; command[0] must be allowlisted
+        namespace: Namespace of the pod (default: "default")
+        container: Optional container name within the pod
 
     Returns:
         Dictionary with success status, stdout, stderr
     """
     try:
-        if args and args[0] == "kubectl":
-            args = args[1:]
-        if not args:
+        _validate_identifier(pod, "pod")
+        _validate_identifier(namespace, "namespace")
+        if container:
+            _validate_identifier(container, "container")
+        if not command:
             raise ValueError("No command provided")
-        # Defense in depth: still reject dangerous flags / shell metacharacters.
-        for arg in args:
-            flag = arg.split("=")[0]
-            if flag in DANGEROUS_FLAGS:
-                raise ValueError(f"Flag '{flag}' is not permitted")
-            _reject_shell_chars(arg, "argument")
-        if not match_preapproved_command(args):
+        # Defense in depth: reject shell metacharacters in the in-container argv.
+        # (command args run after `--`, so kubectl never interprets them as flags.)
+        for part in command:
+            _reject_shell_chars(part, "command")
+        if not is_preapproved_exec_command(command):
             raise ValueError(
-                f"Command {args!r} is not pre-approved. "
-                f"Pre-approved patterns: {', '.join(PREAPPROVED_COMMANDS)}. "
+                f"Command binary {command[0]!r} is not pre-approved. "
+                f"Allowed binaries: {', '.join(sorted(PREAPPROVED_EXEC_BINARIES))}. "
                 f"Use run_kubectl_command (requires human approval) for anything else."
             )
     except ValueError as e:
-        logger.warning(f"run_preapproved_kubectl_command refused: {e}")
+        logger.warning(f"run_preapproved_kubectl_exec_command refused: {e}")
         return {"success": False, "error": str(e)}
 
-    return _run_kubectl(args)
+    exec_args = ["exec", pod, "-n", namespace]
+    if container:
+        exec_args.extend(["-c", container])
+    exec_args.extend(["--", *command])
+    return _run_kubectl(exec_args)
 
 
 @mcp.tool(
@@ -660,7 +640,7 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
     return {
         "allowed_commands": sorted(ALLOWED_COMMANDS),
         "dangerous_flags": sorted(DANGEROUS_FLAGS),
-        "preapproved_commands": list(PREAPPROVED_COMMANDS),
+        "preapproved_exec_binaries": sorted(PREAPPROVED_EXEC_BINARIES),
         "diagnostic_images": list(DIAGNOSTIC_IMAGES),
         "file_read_allowed_paths": list(FILE_READ_ALLOWED_PATHS),
         "file_read_denied_paths": list(FILE_READ_DENIED_PATHS),
@@ -722,7 +702,7 @@ if __name__ == "__main__":
     logger.info("Starting Kubernetes Remediation MCP Server")
     logger.info(f"Allowed verbs (run_kubectl_command): {sorted(ALLOWED_COMMANDS)}")
     logger.info(f"Dangerous flags: {sorted(DANGEROUS_FLAGS)}")
-    logger.info(f"Pre-approved commands: {PREAPPROVED_COMMANDS}")
+    logger.info(f"Pre-approved exec binaries: {sorted(PREAPPROVED_EXEC_BINARIES)}")
     logger.info(f"Diagnostic images: {DIAGNOSTIC_IMAGES}")
     logger.info(f"File-read allowed paths: {FILE_READ_ALLOWED_PATHS}")
     logger.info(f"File-read denied paths: {FILE_READ_DENIED_PATHS}")
