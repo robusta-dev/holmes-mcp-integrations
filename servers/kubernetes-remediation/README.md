@@ -32,12 +32,15 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 | Tool | What it does | Enforced by |
 |------|--------------|-------------|
 | `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied. |
-| `run_preapproved_kubectl_command` | Run a kubectl command from the read-only diagnostics allowlist (`exec ... -- ps/top/df/ls/netstat/ss`). | Command allowlist (prefix/glob). |
+| `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist — only `command[0]` is checked, exactly. |
 | `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag). |
 | `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
 
-`run_preapproved_kubectl_command` deliberately excludes `cat` (use
-`read_file_from_container`) and `env` (leaks secrets).
+`run_preapproved_kubectl_exec_command` deliberately excludes `cat` (use
+`read_file_from_container`) and `env` (leaks secrets). Because the pod/namespace
+and the in-container command are separate parameters and the server owns the
+`kubectl exec ... --` boundary, a caller cannot smuggle a second command or a
+fake separator into the invocation.
 
 ### Approval-gated fallback (always prompts a human)
 
@@ -59,7 +62,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | Tool | Mutating | Approval | Enforced where |
 |------|----------|----------|----------------|
 | `read_file_from_container` | No | Auto | server path policy |
-| `run_preapproved_kubectl_command` | No | Auto | server command allowlist |
+| `run_preapproved_kubectl_exec_command` | No | Auto | server binary allowlist |
 | `run_preapproved_diagnostic_image` | No (data-gathering pod) | Auto | server image allowlist |
 | `get_remediation_mcp_config` | No | Auto | — |
 | `run_kubectl_command` | Yes | **Human approval** | HolmesGPT `approval_required_tools` + server guards |
@@ -70,7 +73,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 |----------|---------|---------|
 | `KUBECTL_ALLOWED_COMMANDS` | `edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec` | Hard verb allowlist for `run_kubectl_command` |
 | `KUBECTL_DANGEROUS_FLAGS` | `--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid` | Blocked flags |
-| `KUBECTL_PREAPPROVED_COMMANDS` | `exec * -- ps*,exec * -- top*,exec * -- df*,exec * -- ls*,exec * -- netstat*,exec * -- ss*` | `run_preapproved_kubectl_command` allowlist |
+| `KUBECTL_PREAPPROVED_EXEC_BINARIES` | `ps,top,df,ls,netstat,ss` | `run_preapproved_kubectl_exec_command` binary allowlist (bare names, no patterns) |
 | `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_preapproved_diagnostic_image` allowlist |
 | `KUBECTL_FILE_READ_ALLOWED_PATHS` | `/` | `read_file_from_container` allow roots |
 | `KUBECTL_FILE_READ_DENIED_PATHS` | `/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/` | secret-mount denylist |

