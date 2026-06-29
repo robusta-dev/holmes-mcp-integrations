@@ -73,3 +73,19 @@ COPY patch-supergateway-child-leak.sh /tmp/
 RUN chmod +x /tmp/patch-supergateway-child-leak.sh && \
     /tmp/patch-supergateway-child-leak.sh && \
     rm /tmp/patch-supergateway-child-leak.sh
+
+# Fix stdio→SSE shared-Server crash on the 2nd SSE client.
+# supergateway 3.4.3's stdioToSse adapter declares a single `Server` at
+# the gateway-function scope and calls `server.connect()` on it for every
+# incoming SSE GET. @modelcontextprotocol/sdk >= 1.26 (the fix for
+# CVE-2026-25536, "cross-client response leak via shared Server reuse")
+# refuses the second connect() with "Already connected to a transport" —
+# the throw escapes Express, Node exits 1, kubelet crashloops the pod.
+# This patch shadows the outer Server with a per-connection one inside
+# the SSE handler, closing the CVE properly (per-client isolation) and
+# eliminating the crash. Version-pinned — build fails if supergateway
+# is bumped past the tested 3.4.3.
+COPY patch-supergateway-sse-transport.sh /tmp/
+RUN chmod +x /tmp/patch-supergateway-sse-transport.sh && \
+    /tmp/patch-supergateway-sse-transport.sh && \
+    rm /tmp/patch-supergateway-sse-transport.sh
