@@ -1,7 +1,7 @@
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
-
-# Copy GitHub MCP server binary from official image
-COPY --from=ghcr.io/github/github-mcp-server:latest /server/github-mcp-server /usr/local/bin/
+# Official GitHub MCP server in native HTTP mode.
+# Distroless base — supergateway is no longer needed (the binary now speaks
+# streamable HTTP directly via the `http` subcommand, see github/github-mcp-server v1.4.0).
+FROM ghcr.io/github/github-mcp-server:v1.4.0
 
 EXPOSE 8000
-CMD ["--port", "8000", "--stdio", "github-mcp-server stdio"]
+CMD ["http", "--port", "8000"]
