@@ -1,7 +1,10 @@
 # Azure API MCP Server
 # Builds from source since Microsoft doesn't provide pre-built images
 
-FROM golang:1.26-alpine AS builder
+# Pin an explicit patched Go: the floating 1.26-alpine tag baked stdlib 1.26.2 into the
+# binary at build time. 1.26.4 clears CVE-2026-42504, CVE-2026-27145 and CVE-2026-42507
+# (plus the <1.26.3 stdlib CVEs). Bump this when a newer Go security release lands.
+FROM golang:1.26.4-alpine AS builder
 
 # Install git for cloning the repository
 RUN apk add --no-cache git
