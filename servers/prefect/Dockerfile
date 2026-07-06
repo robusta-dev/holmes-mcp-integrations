@@ -2,7 +2,7 @@
 # Wraps the Prefect MCP stdio server and exposes it as SSE HTTP API
 # Pre-installs prefect-mcp at build time (no runtime network needed)
 
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:latest
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:0.1.5
 
 # Switch to root to install Python and prefect-mcp
 USER root
