@@ -40,7 +40,12 @@ ENV AWS_MCP_SERVER_CMD="python3 -m awslabs.aws_api_mcp_server.server" \
     AWS_API_MCP_ALLOWED_ORIGINS=* \
     AUTH_TYPE=no-auth
 
-# Runs as root: wrapper.py writes the assumed-role credentials to /root/.aws.
+# Run as a non-root user: wrapper.py writes the assumed-role credentials to
+# the running user's ~/.aws (i.e. /home/mcp/.aws).
+RUN adduser -D -u 1000 mcp
+USER mcp
+ENV HOME=/home/mcp
+
 EXPOSE 8000
 
 CMD ["python3", "/app/wrapper.py"]

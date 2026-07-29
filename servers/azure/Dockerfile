@@ -41,6 +41,11 @@ RUN apk add --no-cache ca-certificates python3 py3-pip && \
 # Copy the built binary from builder stage
 COPY --from=builder /azure-api-mcp/bin/azure-api-mcp /usr/local/bin/
 
+# Run as a non-root user. Azure CLI needs a writable $HOME (~/.azure).
+RUN adduser -D -u 1000 mcp
+USER mcp
+ENV HOME=/home/mcp
+
 # Expose the default port
 EXPOSE 8000
 

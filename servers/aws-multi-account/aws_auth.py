@@ -169,7 +169,7 @@ def _refresh_loop(config_path, token_path, aws_dir):
 def setup_aws_profiles(
     config_path: str = AWS_ACCOUNT_ROLES_FILE,
     token_path: str = "/var/run/secrets/eks.amazonaws.com/serviceaccount/token",
-    aws_dir: str = "/root/.aws"
+    aws_dir: str = os.path.expanduser("~/.aws")
 ):
     """
     Set up AWS profiles by refreshing credentials and starting background refresh thread.

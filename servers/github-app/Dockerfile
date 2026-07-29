@@ -1,4 +1,4 @@
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:0.1.5
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:0.1.6
 
 USER root
 
@@ -13,5 +13,8 @@ COPY --from=ghcr.io/github/github-mcp-server:latest /server/github-mcp-server /u
 COPY github_app_auth.py /app/
 COPY wrapper.py /app/
 
+# Drop privileges: auth is env-only (nothing is written to disk), so the
+# node user from the supergateway base is sufficient at runtime.
+USER node
 EXPOSE 8000
 CMD ["--port", "8000", "--stdio", "python3 /app/wrapper.py"]

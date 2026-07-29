@@ -89,3 +89,7 @@ COPY patch-supergateway-sse-transport.sh /tmp/
 RUN chmod +x /tmp/patch-supergateway-sse-transport.sh && \
     /tmp/patch-supergateway-sse-transport.sh && \
     rm /tmp/patch-supergateway-sse-transport.sh
+
+# Non-root by default. Child images that need root for package installs
+# switch back explicitly (USER root) and must drop privileges again.
+USER node
