@@ -23,7 +23,7 @@ import subprocess
 import sys
 import threading
 
-from github_app_auth import InstallationTokenManager, StaticTokenManager
+from github_utils import InstallationTokenManager, StaticTokenManager
 from proxy import LISTEN_PORT, UPSTREAM_PORT, run_proxy
 
 logging.basicConfig(

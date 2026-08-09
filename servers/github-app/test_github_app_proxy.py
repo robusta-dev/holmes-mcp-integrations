@@ -2,6 +2,7 @@
 
 Run with: pytest servers/github-app/
 Dev dependencies (not shipped in the image): pytest, responses.
+Runtime dependencies (same as the image): PyGithub, requests.
 """
 
 import json
@@ -15,13 +16,18 @@ import responses
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-import github_app_auth
 import proxy as proxy_module
-from github_app_auth import InstallationTokenManager, StaticTokenManager, TokenMintError
-from owner_extraction import extract_owner
+from github_utils import (
+    InstallationTokenManager,
+    StaticTokenManager,
+    TokenMintError,
+    extract_owner,
+)
 from proxy import run_proxy
 
-API = "https://api.github.com"
+# PyGithub builds request URLs with an explicit port (":443"), and the
+# responses library matches URLs literally — so mocks must include it.
+API = "https://api.github.com:443"
 
 
 @pytest.fixture(scope="module")
@@ -127,14 +133,20 @@ def _installation(inst_id, login):
 def test_discovery_paginated_and_lowercased(private_key_pem, monkeypatch):
     monkeypatch.delenv("GITHUB_APP_DEFAULT_OWNER", raising=False)
     monkeypatch.delenv("GITHUB_APP_DEFAULT_INSTALLATION_ID", raising=False)
-    page2 = f"{API}/app/installations?per_page=100&page=2"
+    # The Link header mimics real GitHub (no explicit port — PyGithub asserts
+    # the next-URL port matches its base URL); the mock registration needs it.
+    page2_link = "https://api.github.com/app/installations?per_page=100&page=2"
     responses.add(
         responses.GET,
         f"{API}/app/installations",
         json=[_installation(101, "Acme-Org")],
-        headers={"Link": f'<{page2}>; rel="next"'},
+        headers={"Link": f'<{page2_link}>; rel="next"'},
     )
-    responses.add(responses.GET, page2, json=[_installation(202, "octocat")])
+    responses.add(
+        responses.GET,
+        f"{API}/app/installations?per_page=100&page=2",
+        json=[_installation(202, "octocat")],
+    )
 
     mgr = InstallationTokenManager("12345", private_key_pem)
     mgr.refresh_installations()
@@ -185,7 +197,7 @@ def test_discovery_ghes_api_base(private_key_pem, monkeypatch):
     try:
         responses.add(
             responses.GET,
-            "https://github.mycompany.com/api/v3/app/installations",
+            "https://github.mycompany.com:443/api/v3/app/installations",
             json=[_installation(7, "acme-org")],
         )
         mgr = InstallationTokenManager("12345", private_key_pem)
@@ -287,11 +299,17 @@ def test_pin_mode_never_discovers(private_key_pem):
     assert all("/app/installations/555/" in c.request.url for c in responses.calls)
 
 
+@responses.activate
 def test_private_key_literal_newlines(private_key_pem):
     escaped = private_key_pem.replace("\n", "\\n")
+    responses.add(
+        responses.POST,
+        f"{API}/app/installations/9/access_tokens",
+        json={"token": "ghs_ok", "expires_at": _expires_at()},
+    )
     mgr = InstallationTokenManager("12345", escaped)
-    # JWT signing works -> the \n normalization did its job
-    assert mgr._app_jwt()
+    # Minting signs an App JWT with the key -> the \n normalization did its job
+    assert mgr.get_token(9) == "ghs_ok"
 
 
 def test_static_token_manager():

@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 import requests
 
-from owner_extraction import extract_owner
+from github_utils import extract_owner
 
 logger = logging.getLogger(__name__)
 

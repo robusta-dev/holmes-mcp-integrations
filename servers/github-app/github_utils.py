@@ -1,29 +1,39 @@
-"""GitHub App authentication: installation discovery and token management.
+"""All GitHub-internal logic for the multi-org MCP proxy in one place.
 
-An App JWT (signed with the App's private key) can enumerate every
-installation of the App via ``GET /app/installations`` and mint a short-lived
-(1 hour) installation access token per installation. Installation tokens are
-scoped to a single org/user account, so serving multiple organizations means
-holding one token per installation and picking the right one per request.
+Covers three concerns:
+
+1. GitHub App credentials — delegated to PyGithub (``Auth.AppAuth`` +
+   ``GithubIntegration``), which handles App JWT signing, installation
+   enumeration (with pagination) and installation-token minting natively.
+2. Installation routing — the owner -> installation map, default-installation
+   selection and a small per-installation token cache (PyGithub's
+   ``get_access_token`` does not cache, and its auto-refreshing
+   ``AppInstallationAuth`` only works bound to a ``Github`` client, not as a
+   raw-token source for proxy headers).
+3. Owner extraction — pulling the target org/user out of an MCP JSON-RPC
+   ``tools/call`` body so the proxy can pick the right installation token.
+
+Background: an App JWT can enumerate every installation of the App via
+``GET /app/installations`` and mint a short-lived (1 hour) installation access
+token per installation. Installation tokens are scoped to a single org/user
+account, so serving multiple organizations means holding one token per
+installation and picking the right one per request.
 """
 
 import logging
 import os
+import re
 import threading
 import time
-from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-import jwt
-import requests
+from github import Auth, GithubIntegration
+from github.GithubException import GithubException
 
 logger = logging.getLogger(__name__)
 
 # Re-mint an installation token when it has less than this long left to live.
 TOKEN_EXPIRY_MARGIN_SEC = 300
-# Re-sign the App JWT when it has less than this long left to live.
-JWT_EXPIRY_MARGIN_SEC = 60
-JWT_LIFETIME_SEC = 600  # 10 minutes (GitHub maximum)
 
 DEFAULT_INSTALLATION_REFRESH_SEC = 300
 
@@ -42,7 +52,7 @@ def _mask_token(token: str) -> str:
     return f"{token[:4]}...{token[-4:]}"
 
 
-def _get_api_base() -> str:
+def get_api_base() -> str:
     """Derive the GitHub REST API base URL from the GITHUB_HOST env var.
 
     Mirrors how github-mcp-server resolves hosts:
@@ -62,13 +72,67 @@ def _get_api_base() -> str:
     return f"https://{host}/api/v3"
 
 
-def _parse_expires_at(expires_at: str) -> float:
-    """Convert GitHub's ISO-8601 expires_at (e.g. 2016-07-11T22:14:10Z) to epoch."""
-    return (
-        datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%SZ")
-        .replace(tzinfo=timezone.utc)
-        .timestamp()
-    )
+# ---------------------------------------------------------------------------
+# Owner extraction from MCP JSON-RPC bodies
+# ---------------------------------------------------------------------------
+
+# Argument names used by github-mcp-server tools to identify an account,
+# in priority order. Re-check this list when bumping the pinned binary version.
+OWNER_ARG_KEYS = ("owner", "org", "organization", "username", "user")
+
+# Search tools carry the account inside a free-text query argument.
+QUERY_ARG_KEYS = ("query", "q")
+
+# org:NAME / user:NAME / owner:NAME / repo:OWNER/NAME — first hit wins.
+# GitHub logins: alphanumerics and inner hyphens.
+_QUALIFIER_RE = re.compile(
+    r"\b(?:org|user|owner):([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)"
+    r"|\brepo:([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/"
+)
+
+
+def _owner_from_arguments(arguments: Any) -> Optional[str]:
+    if not isinstance(arguments, dict):
+        return None
+    for key in OWNER_ARG_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            # Tolerate "owner/repo" pasted into an owner-only field.
+            return value.strip().split("/", 1)[0].lower()
+    for key in QUERY_ARG_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str):
+            match = _QUALIFIER_RE.search(value)
+            if match:
+                return (match.group(1) or match.group(2)).lower()
+    return None
+
+
+def extract_owner(body: Any) -> Optional[str]:
+    """Return the GitHub account login targeted by a JSON-RPC message, or None.
+
+    Only ``tools/call`` requests carry a target account; everything else
+    (initialize, tools/list, notifications) returns None and is served with
+    the default installation. Batch arrays are handled by taking the first
+    tools/call element.
+    """
+    if isinstance(body, list):
+        for element in body:
+            owner = extract_owner(element)
+            if owner:
+                return owner
+        return None
+    if not isinstance(body, dict) or body.get("method") != "tools/call":
+        return None
+    params = body.get("params")
+    if not isinstance(params, dict):
+        return None
+    return _owner_from_arguments(params.get("arguments"))
+
+
+# ---------------------------------------------------------------------------
+# Token managers
+# ---------------------------------------------------------------------------
 
 
 class StaticTokenManager:
@@ -90,11 +154,14 @@ class StaticTokenManager:
 class InstallationTokenManager:
     """Discovers GitHub App installations and caches one token per installation.
 
+    Credential mechanics (JWT signing, installation listing, token minting)
+    are delegated to PyGithub's ``GithubIntegration``.
+
     Two modes:
     - pinned (``pinned_installation_id`` set): discovery is skipped entirely and
       every request resolves to the pinned installation — identical behavior to
       the historical single-installation setup.
-    - auto-discovery: ``GET /app/installations`` builds an owner -> installation
+    - auto-discovery: ``get_installations()`` builds an owner -> installation
       map, refreshed periodically so new installations appear without restart.
     """
 
@@ -105,14 +172,14 @@ class InstallationTokenManager:
         pinned_installation_id: Optional[str] = None,
         api_base: Optional[str] = None,
     ):
-        self._app_id = app_id
         # Handle literal \n in private key (common in CI/CD and K8s secrets)
-        self._private_key = private_key.replace("\\n", "\n")
-        self._api_base = api_base or _get_api_base()
+        auth = Auth.AppAuth(app_id, private_key.replace("\\n", "\n"))
+        self._integration = GithubIntegration(
+            auth=auth, base_url=api_base or get_api_base(), per_page=100
+        )
         self._pinned = int(pinned_installation_id) if pinned_installation_id else None
 
         self._lock = threading.Lock()
-        self._jwt_cache: Optional[Tuple[str, float]] = None  # (jwt, exp_epoch)
         self._installations: Dict[str, int] = {}  # lowercase login -> installation id
         self._installation_order: list = []  # ids in discovery order
         self._default_installation_id: Optional[int] = None
@@ -124,21 +191,6 @@ class InstallationTokenManager:
             os.environ.get("GITHUB_APP_DEFAULT_OWNER") or ""
         ).strip().lower() or None
 
-    # -- App JWT ------------------------------------------------------------
-
-    def _app_jwt(self) -> str:
-        now = time.time()
-        if self._jwt_cache and self._jwt_cache[1] - now > JWT_EXPIRY_MARGIN_SEC:
-            return self._jwt_cache[0]
-        payload = {
-            "iat": int(now) - 60,  # clock-skew guard
-            "exp": int(now) + JWT_LIFETIME_SEC,
-            "iss": self._app_id,
-        }
-        encoded = jwt.encode(payload, self._private_key, algorithm="RS256")
-        self._jwt_cache = (encoded, now + JWT_LIFETIME_SEC)
-        return encoded
-
     # -- Installation discovery ----------------------------------------------
 
     def refresh_installations(self) -> None:
@@ -149,24 +201,23 @@ class InstallationTokenManager:
         """
         if self._pinned is not None:
             return
+        owners: Dict[str, int] = {}
+        order: list = []
         try:
-            installations = self._list_installations()
+            for inst in self._integration.get_installations():
+                # raw_data instead of inst.account: PyGithub only populates the
+                # account property when target_type maps to User/Organization.
+                login = ((inst.raw_data.get("account") or {}).get("login") or "").lower()
+                if not login or not inst.id:
+                    continue
+                owners[login] = inst.id
+                order.append(inst.id)
         except Exception:
             logger.warning(
                 "Failed to refresh GitHub App installations, keeping previous map",
                 exc_info=True,
             )
             return
-
-        owners = {}
-        order = []
-        for inst in installations:
-            login = ((inst.get("account") or {}).get("login") or "").lower()
-            inst_id = inst.get("id")
-            if not login or not inst_id:
-                continue
-            owners[login] = inst_id
-            order.append(inst_id)
 
         with self._lock:
             self._installations = owners
@@ -179,26 +230,6 @@ class InstallationTokenManager:
             ", ".join(sorted(owners)) or "none",
             self._default_installation_id,
         )
-
-    def _list_installations(self) -> list:
-        url = f"{self._api_base}/app/installations?per_page=100"
-        results = []
-        while url:
-            response = requests.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {self._app_jwt()}",
-                    "Accept": "application/vnd.github+json",
-                },
-                timeout=30,
-            )
-            if response.status_code >= 400:
-                raise TokenMintError(
-                    f"GET {url} failed with HTTP {response.status_code}: {response.text}"
-                )
-            results.extend(response.json())
-            url = response.links.get("next", {}).get("url")
-        return results
 
     def _pick_default(self, owners: Dict[str, int], order: list) -> Optional[int]:
         if self._env_default_id is not None:
@@ -250,34 +281,28 @@ class InstallationTokenManager:
             cached = self._tokens.get(installation_id)
             if cached and cached[1] - now > TOKEN_EXPIRY_MARGIN_SEC:
                 return cached[0]
-            token, expires_at = self._mint_token(installation_id)
-            self._tokens[installation_id] = (token, expires_at)
-            return token
-
-    def _mint_token(self, installation_id: int) -> Tuple[str, float]:
-        url = f"{self._api_base}/app/installations/{installation_id}/access_tokens"
-        response = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {self._app_jwt()}",
-                "Accept": "application/vnd.github+json",
-            },
-            timeout=30,
-        )
-        if response.status_code >= 400:
-            raise TokenMintError(
-                f"POST {url} failed with HTTP {response.status_code}: {response.text}"
+            try:
+                authorization = self._integration.get_access_token(installation_id)
+            except GithubException as e:
+                # str(GithubException) carries status + API body for the LLM.
+                raise TokenMintError(
+                    f"Minting an access token for installation {installation_id} "
+                    f"failed: {e}"
+                ) from e
+            token = authorization.token
+            expires_at = (
+                authorization.expires_at.timestamp()
+                if authorization.expires_at
+                else time.time() + 3600
             )
-        data = response.json()
-        token = data["token"]
-        expires_at = _parse_expires_at(data["expires_at"]) if data.get("expires_at") else time.time() + 3600
-        logger.info(
-            "Minted installation token for installation %s (%s), expires at %s",
-            installation_id,
-            _mask_token(token),
-            data.get("expires_at", "unknown"),
-        )
-        return token, expires_at
+            self._tokens[installation_id] = (token, expires_at)
+            logger.info(
+                "Minted installation token for installation %s (%s), expires at %s",
+                installation_id,
+                _mask_token(token),
+                authorization.expires_at or "unknown",
+            )
+            return token
 
     # -- Background refresh ----------------------------------------------------
 

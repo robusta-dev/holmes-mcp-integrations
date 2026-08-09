@@ -9,7 +9,7 @@ Holmes ──streamable HTTP──▶ :8000 proxy.py ──▶ 127.0.0.1:8081 gi
                                  │                (native HTTP mode, per-request
                                  │                 Authorization: Bearer auth)
                                  ▼
-                          github_app_auth.py
+                          github_utils.py (PyGithub)
                           App JWT ─▶ GET /app/installations   (auto-discovery, 5-min refresh)
                                   ─▶ POST /app/installations/{id}/access_tokens
                                      (one token per installation, cached ~55 min)
@@ -23,12 +23,15 @@ Holmes ──streamable HTTP──▶ :8000 proxy.py ──▶ 127.0.0.1:8081 gi
   and forwards everything else transparently (headers, SSE streaming responses).
   Client-supplied `Authorization` headers are always overwritten. Serves
   `/healthz` and `/readyz` (ready = at least one installation discovered).
-- `owner_extraction.py` — determines which GitHub account a `tools/call`
-  targets, from the `owner` / `org` / `organization` / `username` / `user`
-  arguments, or from `org:NAME` / `user:NAME` / `owner:NAME` / `repo:OWNER/...`
-  qualifiers inside search `query` strings.
-- `github_app_auth.py` — installation discovery and token cache. Tokens are
-  minted on demand and cached until 5 minutes before their 1-hour expiry.
+- `github_utils.py` — all GitHub-internal logic. Credential mechanics (App JWT
+  signing, installation enumeration, token minting) are delegated to
+  [PyGithub](https://github.com/PyGithub/PyGithub) (`Auth.AppAuth` +
+  `GithubIntegration`); on top of that it keeps the owner → installation
+  routing map, a per-installation token cache (tokens are minted on demand and
+  cached until 5 minutes before their 1-hour expiry), and the owner extraction
+  for `tools/call` bodies — from the `owner` / `org` / `organization` /
+  `username` / `user` arguments, or from `org:NAME` / `user:NAME` /
+  `owner:NAME` / `repo:OWNER/...` qualifiers inside search `query` strings.
 
 ## Multi-organization routing
 
@@ -103,13 +106,13 @@ forwarded verbatim to the underlying `github-mcp-server`.
 ```
 
 The `github-mcp-server` binary version is pinned in the Dockerfile. When
-bumping it, re-check `OWNER_ARG_KEYS` in `owner_extraction.py` against the new
+bumping it, re-check `OWNER_ARG_KEYS` in `github_utils.py` against the new
 release's tool argument names.
 
 ## Testing
 
 ```bash
-pip install pytest responses PyJWT cryptography requests
+pip install pytest responses PyGithub requests
 pytest servers/github-app/
 ```
 
@@ -120,4 +123,4 @@ pytest servers/github-app/
 | Auth | PAT only (header set by the client) | GitHub App (multi-org) + PAT fallback |
 | Token management | None (static PAT) | Per-installation minting + caching |
 | Multi-org | One token = one scope | Routes per request by owner/org |
-| Dependencies | None (Go binary only) | Python, PyJWT, cryptography, requests |
+| Dependencies | None (Go binary only) | Python, PyGithub, requests |
