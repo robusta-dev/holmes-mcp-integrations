@@ -7,10 +7,10 @@ A GitHub MCP server image that supports [GitHub App](https://docs.github.com/en/
 ```
 Holmes → :8000 wrapper.py ── per-request token ──→ 127.0.0.1:8081 github-mcp-server http
                   ↓
-           github_utils.py (PyGithub: installations → tokens)
+           github_app_auth.py (PyGithub: installations → tokens)
 ```
 
-An installation token is scoped to one account, so `github_utils.py` discovers every installation of the App and caches a token per installation. `wrapper.py` proxies each request to the binary, choosing the token from the `owner`/`org` argument of the tool call.
+An installation token is scoped to one account, so `github_app_auth.py` discovers every installation of the App and caches a token per installation. `wrapper.py` proxies each request to the binary, choosing the token from the `owner`/`org` argument of the tool call.
 
 ## Authentication
 

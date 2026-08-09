@@ -13,7 +13,7 @@ from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from github_utils import AppTokens, TokenError, extract_owner, static_token
+from github_app_auth import AppTokens, TokenError, extract_owner, static_token
 
 UPSTREAM_PORT = os.environ.get("GITHUB_MCP_UPSTREAM_PORT", "8081")
 UPSTREAM = f"http://127.0.0.1:{UPSTREAM_PORT}"

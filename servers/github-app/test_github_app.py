@@ -5,7 +5,7 @@ import responses
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from github_utils import AppTokens, TokenError, extract_owner
+from github_app_auth import AppTokens, TokenError, extract_owner
 
 API = "https://api.github.com:443"
 ACME = [{"id": 101, "account": {"login": "Acme-Org"}}]
