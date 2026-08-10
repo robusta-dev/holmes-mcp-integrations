@@ -69,7 +69,10 @@ def build_tokens():
         logging.warning("GITHUB_APP_TOKEN_REFRESH_INTERVAL_SEC is deprecated and ignored")
     if app_id and private_key:
         tokens = AppTokens(app_id, private_key, pinned)
-        tokens.token_for(None) if pinned else tokens.discover()
+        if pinned:
+            tokens.token_for(None)
+        else:
+            tokens.discover()
         return tokens
     if pat := os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN"):
         return static_token(pat)
