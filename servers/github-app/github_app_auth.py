@@ -1,35 +1,43 @@
 import logging
 import os
+import re
 import threading
 import time
+from types import SimpleNamespace
 
-import jwt
-import requests
+from github import Auth, GithubIntegration
+from github.GithubException import GithubException
 
-logger = logging.getLogger(__name__)
-
-REFRESH_INTERVAL_SEC = int(os.environ.get("GITHUB_APP_TOKEN_REFRESH_INTERVAL_SEC", "1800"))
-
-
-def _mask_token(token: str) -> str:
-    if len(token) <= 8:
-        return "***"
-    return f"{token[:4]}...{token[-4:]}"
+OWNER_KEYS = ("owner", "org", "organization", "username", "user")
+QUALIFIER = re.compile(r"\b(?:org|user|owner):([\w-]+)|\brepo:([\w-]+)/")
+EXPIRY_MARGIN_SEC = 300
+REDISCOVERY_COOLDOWN_SEC = 60
 
 
-def _get_api_base() -> str:
-    """Derive the GitHub REST API base URL from the GITHUB_HOST env var.
+class TokenError(Exception):
+    pass
 
-    Mirrors how github-mcp-server resolves hosts:
-    - unset / github.com / api.github.com  -> https://api.github.com
-    - *.ghe.com (GHE.com / data residency) -> https://api.<host>
-    - any other host (GHES)                 -> https://<host>/api/v3
-    """
-    host = (os.environ.get("GITHUB_HOST") or "").strip()
-    if "://" in host:
-        host = host.split("://", 1)[1]
-    host = host.strip("/").lower()
 
+def extract_owner(body):
+    if isinstance(body, list):
+        return next((owner for owner in map(extract_owner, body) if owner), None)
+    if not isinstance(body, dict) or body.get("method") != "tools/call":
+        return None
+    params = body.get("params")
+    args = params.get("arguments") if isinstance(params, dict) else None
+    if not isinstance(args, dict):
+        return None
+    for key in OWNER_KEYS:
+        if isinstance(args.get(key), str) and args[key].strip():
+            return args[key].strip().split("/")[0].lower()
+    for key in ("query", "q"):
+        if isinstance(args.get(key), str) and (found := QUALIFIER.search(args[key])):
+            return (found.group(1) or found.group(2)).lower()
+    return None
+
+
+def api_base():
+    host = (os.environ.get("GITHUB_HOST") or "").split("://")[-1].strip("/ ").lower()
     if not host or host in ("github.com", "www.github.com", "api.github.com"):
         return "https://api.github.com"
     if host.endswith(".ghe.com"):
@@ -37,80 +45,54 @@ def _get_api_base() -> str:
     return f"https://{host}/api/v3"
 
 
-def _generate_jwt(app_id: str, private_key: str) -> str:
-    now = int(time.time())
-    payload = {
-        "iat": now - 60,
-        "exp": now + 600,  # 10 minutes (GitHub maximum)
-        "iss": app_id,
-    }
-    return jwt.encode(payload, private_key, algorithm="RS256")
+def static_token(token):
+    return SimpleNamespace(token_for=lambda owner=None: token, ready=lambda: True)
 
 
-def _exchange_jwt_for_token(encoded_jwt: str, installation_id: str) -> dict:
-    response = requests.post(
-        f"{_get_api_base()}/app/installations/{installation_id}/access_tokens",
-        headers={
-            "Authorization": f"Bearer {encoded_jwt}",
-            "Accept": "application/vnd.github+json",
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()
+class AppTokens:
+    def __init__(self, app_id, private_key, pinned=None):
+        self._api = GithubIntegration(
+            auth=Auth.AppAuth(app_id, private_key.replace("\\n", "\n")),
+            base_url=api_base(), per_page=100)
+        self._pinned = int(pinned) if pinned else None
+        self._lock = threading.Lock()
+        self._installations, self._tokens, self._discovered_at = {}, {}, 0.0
 
+    def ready(self):
+        return bool(self._pinned or self._installations)
 
-def refresh_token(app_id: str, installation_id: str, private_key: str) -> str:
-    """Generate a new GitHub installation access token and set it as GITHUB_PERSONAL_ACCESS_TOKEN."""
-    encoded_jwt = _generate_jwt(app_id, private_key)
-    data = _exchange_jwt_for_token(encoded_jwt, installation_id)
-    token = data["token"]
-
-    os.environ["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
-    logger.info(
-        "GitHub App token refreshed (%s), expires at %s",
-        _mask_token(token),
-        data.get("expires_at", "unknown"),
-    )
-    return token
-
-
-def _refresh_loop(app_id: str, installation_id: str, private_key: str):
-    while True:
-        time.sleep(REFRESH_INTERVAL_SEC)
+    def discover(self):
+        if self._pinned:
+            return
         try:
-            refresh_token(app_id, installation_id, private_key)
+            found = {login.lower(): entry.id for entry in self._api.get_installations()
+                     if (login := (entry.raw_data.get("account") or {}).get("login"))}
         except Exception:
-            logger.warning("Background refresh failed, will retry", exc_info=True)
+            logging.warning("Installation discovery failed, keeping previous map", exc_info=True)
+            return
+        with self._lock:
+            self._installations, self._discovered_at = found, time.time()
+        logging.info("Serving installations: %s", ", ".join(sorted(found)) or "none")
 
-
-def setup_github_app_auth():
-    """Generate an installation token and start background refresh.
-
-    Reads GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, and GITHUB_APP_PRIVATE_KEY
-    from environment. Sets GITHUB_PERSONAL_ACCESS_TOKEN so the github-mcp-server
-    binary can authenticate with GitHub.
-    """
-    app_id = os.environ.get("GITHUB_APP_ID")
-    installation_id = os.environ.get("GITHUB_APP_INSTALLATION_ID")
-    private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY")
-
-    if not all([app_id, installation_id, private_key]):
-        logger.info("GitHub App env vars not set, skipping App auth setup")
-        return False
-
-    # Handle literal \n in private key (common in CI/CD and K8s secrets)
-    private_key = private_key.replace("\\n", "\n")
-
-    token = refresh_token(app_id, installation_id, private_key)
-    logger.info("Initial token generated (%s)", _mask_token(token))
-
-    thread = threading.Thread(
-        target=_refresh_loop,
-        args=(app_id, installation_id, private_key),
-        daemon=True,
-    )
-    thread.start()
-    logger.info("Started token refresh thread (interval: %ds)", REFRESH_INTERVAL_SEC)
-
-    return True
+    def token_for(self, owner):
+        owner = (owner or "").lower()
+        if not self._pinned and owner not in self._installations \
+                and time.time() - self._discovered_at > REDISCOVERY_COOLDOWN_SEC:
+            self.discover()
+        with self._lock:
+            installation = (self._pinned or self._installations.get(owner)
+                            or next(iter(self._installations.values()), None))
+            if not installation:
+                raise TokenError("No GitHub App installations found. Install the App on an "
+                                 "organization, or set GITHUB_APP_INSTALLATION_ID.")
+            token, expires_at = self._tokens.get(installation, (None, 0.0))
+            if expires_at - time.time() > EXPIRY_MARGIN_SEC:
+                return token
+            try:
+                minted = self._api.get_access_token(installation)
+            except GithubException as e:
+                raise TokenError(f"Cannot mint a token for installation {installation}: {e}") from e
+            self._tokens[installation] = (minted.token, minted.expires_at.timestamp())
+            logging.info("Minted a token for installation %s, expiring %s",
+                         installation, minted.expires_at)
+            return minted.token

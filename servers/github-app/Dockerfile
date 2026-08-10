@@ -1,17 +1,12 @@
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:0.1.5
+FROM python:3.13-alpine
 
-USER root
-
-RUN apk add --no-cache python3 py3-pip
-RUN pip3 install --no-cache-dir --break-system-packages PyJWT cryptography requests && \
-    pip3 install --no-cache-dir --break-system-packages --upgrade \
-    jaraco-context wheel cryptography setuptools pip
+RUN pip3 install --no-cache-dir PyGithub==2.9.1 starlette==1.6.0 uvicorn==0.52.1 httpx==0.28.1 && \
+    pip3 install --no-cache-dir --upgrade setuptools pip wheel
 
 # Copy GitHub MCP server binary from official image
-COPY --from=ghcr.io/github/github-mcp-server:latest /server/github-mcp-server /usr/local/bin/
+COPY --from=ghcr.io/github/github-mcp-server:v1.4.0 /server/github-mcp-server /usr/local/bin/
 
-COPY github_app_auth.py /app/
-COPY wrapper.py /app/
+COPY github_app_auth.py wrapper.py /app/
 
 EXPOSE 8000
-CMD ["--port", "8000", "--stdio", "python3 /app/wrapper.py"]
+ENTRYPOINT ["python3", "/app/wrapper.py"]
