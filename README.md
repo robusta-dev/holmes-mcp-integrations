@@ -19,8 +19,6 @@ holmes-mcp-integrations/
     │   └── storage/              # GCP Storage MCP Server
     ├── github/                   # GitHub MCP Server
     ├── kubernetes-remediation/   # Kubernetes Remediation MCP Server
-    ├── mariadb/
-    │   └── mcp-minimal/          # MariaDB MCP Server (minimal)
     └── sentry/                   # Sentry MCP Server
 ```
 
