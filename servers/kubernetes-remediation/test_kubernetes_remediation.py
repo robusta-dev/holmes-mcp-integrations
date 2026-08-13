@@ -317,7 +317,7 @@ def test_diagnostic_image_rejects_flag_injection_in_name():
     assert result["success"] is False
 
 
-# ── diagnostic-pod target policy (ROB-910 / MCP-EXFIL-005) ───────────────────
+# ── diagnostic-pod target policy (ROB-910) ───────────────────────────────────
 #
 # The tool is auto-approved and the images are network-probing tools, so the
 # probe target is the security boundary: shell-char rejection lets a URL through

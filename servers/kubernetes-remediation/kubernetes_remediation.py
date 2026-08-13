@@ -124,7 +124,7 @@ DIAGNOSTIC_IMAGES = _split_csv(
 # The diagnostic images are network-probing tools (curl/dig/wget/tcpdump) and the
 # tool is auto-approved, so the *targets* are the security boundary: without one,
 # prompt-injected agent output can point curl at the cloud metadata service or at
-# an external collector and read the response back (ROB-910 / MCP-EXFIL-005).
+# an external collector and read the response back (ROB-910).
 #
 # Targets are classified as cluster-internal or external. External targets are
 # refused unless the operator opts in here; link-local/metadata/loopback are
