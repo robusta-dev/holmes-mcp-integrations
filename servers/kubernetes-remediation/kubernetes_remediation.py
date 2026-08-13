@@ -29,14 +29,20 @@ Defense in depth (independent of approval):
     - Dangerous flag blocklist
     - Shell metacharacter rejection (and shell=False everywhere)
     - Path policy can never read secret/token mounts
+    - Diagnostic-pod target policy: cloud-metadata/link-local/loopback refused in
+      every IP spelling, external targets off by default, redirect-following
+      refused — plus an egress NetworkPolicy on the pod as the CNI-enforced
+      backstop (diagnostic-pod-networkpolicy.yaml)
     - Per-command timeout
 """
 
 import os
 import subprocess
+import ipaddress
 import json
 import logging
 import posixpath
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 import sys
@@ -113,6 +119,28 @@ DIAGNOSTIC_IMAGES = _split_csv(
     )
 )
 
+# run_preapproved_diagnostic_image target policy.
+#
+# The diagnostic images are network-probing tools (curl/dig/wget/tcpdump) and the
+# tool is auto-approved, so the *targets* are the security boundary: without one,
+# prompt-injected agent output can point curl at the cloud metadata service or at
+# an external collector and read the response back (ROB-910 / MCP-EXFIL-005).
+#
+# Targets are classified as cluster-internal or external. External targets are
+# refused unless the operator opts in here; link-local/metadata/loopback are
+# refused unconditionally (see DIAGNOSTIC_HARD_DENIED_* below).
+ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS = _env_bool(
+    "KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS", False
+)
+
+# DNS suffixes treated as cluster-internal. Override for a custom cluster domain.
+DIAGNOSTIC_INTERNAL_DNS_SUFFIXES = _split_csv(
+    os.getenv(
+        "KUBECTL_DIAGNOSTIC_INTERNAL_DNS_SUFFIXES",
+        ".svc,.svc.cluster.local,.cluster.local",
+    )
+)
+
 # read_file_from_container path policy.
 FILE_READ_ALLOWED_PATHS = _split_csv(
     os.getenv("KUBECTL_FILE_READ_ALLOWED_PATHS", "/")
@@ -144,9 +172,61 @@ SHELL_CHARS = set(";|&$`\\'\"\n\r")
 # None of these hold application source code, so blocking them costs nothing.
 HARD_DENIED_PATHS = ["/proc", "/sys", "/dev"]
 
+# Networks a diagnostic pod may NEVER be pointed at, regardless of
+# KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS (not operator-removable, same
+# rationale as HARD_DENIED_PATHS). These hold credentials or node-local
+# services that a network probe has no legitimate reason to reach:
+#   169.254.0.0/16   link-local: AWS/Azure/OpenStack IMDS (169.254.169.254),
+#                    ECS task metadata (169.254.170.2). Reachable from a pod
+#                    even with automountServiceAccountToken:false, and IMDSv1
+#                    /GCP/Azure need no pod credential at all.
+#   127.0.0.0/8, ::1 loopback: the node's own kubelet/sidecar ports.
+#   0.0.0.0/8, ::    "this host" — another spelling of loopback.
+#   100.100.100.200  Alibaba Cloud metadata (a /32, so CGNAT-addressed
+#                    clusters are unaffected).
+#   192.0.0.192      Oracle Cloud metadata.
+#   fe80::/10        IPv6 link-local.
+#   fd00:ec2::254    AWS IPv6 IMDS.
+DIAGNOSTIC_HARD_DENIED_NETWORKS = [
+    "169.254.0.0/16",
+    "127.0.0.0/8",
+    "0.0.0.0/8",
+    "100.100.100.200/32",
+    "192.0.0.192/32",
+    "::1/128",
+    "::/128",
+    "fe80::/10",
+    "fd00:ec2::254/128",
+]
+
+# Hostnames that resolve to a metadata service. Blocked by name as well as by
+# address, because the name is what the agent would typically use and DNS is
+# resolved inside the diagnostic pod (i.e. after our checks).
+DIAGNOSTIC_HARD_DENIED_HOSTNAMES = {
+    "metadata",
+    "metadata.google.internal",
+    "metadata.goog",
+    "instance-data",
+    "instance-data.ec2.internal",
+}
+
+# curl/wget flags that make the *effective* target differ from the target we
+# validated, by following a server-controlled redirect. An in-cluster service
+# under attacker influence can 302 to 169.254.169.254, so these are refused
+# even when external targets are permitted.
+DIAGNOSTIC_REDIRECT_FLAGS = {
+    "-L",
+    "--location",
+    "--location-trusted",
+}
+
+# Binaries whose redirect-following is worth blocking (see above). Only these get
+# the bundled-short-flag check, so `ls -L` in busybox is not caught by it.
+DIAGNOSTIC_HTTP_CLIENTS = {"curl", "wget"}
+
 
 # Create MCP server
-mcp = FastMCP(name="kubernetes-remediation", version="1.1.0")
+mcp = FastMCP(name="kubernetes-remediation", version="1.2.0")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +356,272 @@ def resolve_diagnostic_image(image: str) -> str:
             f"To run an arbitrary image, use run_kubectl_command (requires human approval)."
         )
     return allowed_by_repo[requested_repo]
+
+
+# ── diagnostic-pod target policy ─────────────────────────────────────────────
+#
+# The checks below decide what a network probe launched by the auto-approved
+# run_preapproved_diagnostic_image may be pointed at. They are the *first* of two
+# layers; the second is the egress NetworkPolicy in
+# diagnostic-pod-networkpolicy.yaml, which is what actually contains a target we
+# failed to recognise here (DNS that resolves to link-local only inside the pod,
+# a redirect we did not block, wget's follow-by-default). Neither layer is
+# sufficient alone: this one gives the model a legible refusal it can correct,
+# the NetworkPolicy gives CNI-enforced containment.
+
+_HOSTNAME_RE = re.compile(
+    r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?"
+    r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$"
+)
+
+
+def _parse_ipv4_component(part: str) -> Optional[int]:
+    """Parse one component of an inet_aton-style address (hex/octal/decimal)."""
+    if not part:
+        return None
+    try:
+        if part.lower().startswith("0x"):
+            return int(part, 16)
+        if part.startswith("0") and len(part) > 1:
+            return int(part, 8)
+        if not part.isdigit():
+            return None
+        return int(part, 10)
+    except ValueError:
+        return None
+
+
+def _decode_ipv4_variants(text: str) -> Optional[Any]:
+    """
+    Decode the non-dotted-quad IPv4 spellings that inet_aton (and therefore
+    curl/wget/ping) accepts, so `http://2852039166/` and `http://0xA9FEA9FE/`
+    are recognised as 169.254.169.254 rather than treated as hostnames.
+
+    Accepts a.b.c.d, a.b.c, a.b and a, each component decimal, 0-prefixed octal
+    or 0x-prefixed hex. A single bare component must exceed 0xFFFFFF to count as
+    an address, so ordinary numeric arguments (`--max-time 5`, `-p 53`, MTU
+    `1500`) are not misread as 0.0.0.5 / 0.0.0.53 / 0.0.5.220.
+    """
+    parts = text.split(".")
+    if len(parts) > 4:
+        return None
+    values = [_parse_ipv4_component(p) for p in parts]
+    if any(v is None for v in values):
+        return None
+
+    n = len(values)
+    # Every component except the last is a single byte; the last absorbs the
+    # remaining (5 - n) bytes (so a.b.c.d -> 1, a.b.c -> 2, a.b -> 3, a -> 4).
+    if any(v < 0 or v > 0xFF for v in values[:-1]):
+        return None
+    trailing_bytes = 5 - n
+    if values[-1] < 0 or values[-1] > 256 ** trailing_bytes - 1:
+        return None
+    if n == 1 and values[0] <= 0xFFFFFF:
+        return None
+
+    packed = 0
+    for v in values[:-1]:
+        packed = (packed << 8) | v
+    packed = (packed << (8 * trailing_bytes)) | values[-1]
+    try:
+        return ipaddress.IPv4Address(packed)
+    except ValueError:
+        return None
+
+
+def _literal_ip(host: str) -> Optional[Any]:
+    """Return the IP address `host` denotes, in any spelling, else None."""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        addr = _decode_ipv4_variants(host)
+    if addr is None:
+        return None
+    # ::ffff:169.254.169.254 must be judged as the v4 address it carries.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped or addr
+
+
+def _strip_port(value: str) -> str:
+    """Strip a trailing :port and IPv6 brackets from an authority."""
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end != -1 else value
+    if value.count(":") == 1:
+        host, port = value.rsplit(":", 1)
+        if port.isdigit():
+            return host
+    return value
+
+
+def _candidate_target_hosts(token: str) -> List[str]:
+    """
+    Extract host-like values from one command token.
+
+    Every token is inspected, not just the ones we expect to be targets, so
+    values that reach the network through a flag are covered too: `-x
+    http://collector` and `--proxy=socks5://collector` route the real connection
+    at the proxy host, and `dig @169.254.169.254 svc` at the @server.
+    """
+    t = token.strip()
+    if not t:
+        return []
+    if t.startswith("@"):  # dig/nslookup server syntax
+        t = t[1:]
+    if "://" in t:  # covers bare URLs and --flag=scheme://host
+        authority = t.split("://", 1)[1].split("/", 1)[0]
+        authority = authority.split("?", 1)[0].split("#", 1)[0]
+        if "@" in authority:  # strip userinfo
+            authority = authority.rsplit("@", 1)[1]
+        return [_strip_port(authority)] if authority else []
+    if t.startswith("-"):
+        # A flag: only its inline value can name a host (`--proxy=host:3128`).
+        if "=" not in t:
+            return []
+        t = t.split("=", 1)[1]
+    return [_strip_port(t)] if t else []
+
+
+def _is_internal_hostname(host: str) -> bool:
+    """True if `host` is a cluster-internal DNS name (bare service name or a
+    configured cluster suffix). Namespace-qualified shortcuts like
+    `kubernetes.default` are deliberately NOT internal: they are
+    indistinguishable from `evil.com` by shape, and the refusal tells the caller
+    to use the FQDN."""
+    lowered = host.lower().rstrip(".")
+    if "." not in lowered:
+        return True
+    return any(
+        lowered.endswith(suffix.lower()) for suffix in DIAGNOSTIC_INTERNAL_DNS_SUFFIXES
+    )
+
+
+def _assert_target_not_hard_denied(host: str, token: str) -> Optional[Any]:
+    """
+    Raise ValueError if `host` is a target no configuration may permit
+    (metadata/link-local/loopback). Returns the literal IP `host` denotes, if
+    any, so the caller does not have to decode it twice.
+    """
+    lowered = host.lower().rstrip(".")
+    if not lowered:
+        return None
+
+    if lowered in DIAGNOSTIC_HARD_DENIED_HOSTNAMES:
+        raise ValueError(
+            f"Target {host!r} in {token!r} is a cloud metadata endpoint and is always "
+            f"refused: it can return instance credentials to the agent. This is not "
+            f"operator-configurable. Use run_kubectl_command (requires human approval) "
+            f"if a human has judged this specific request safe."
+        )
+
+    ip = _literal_ip(lowered)
+    if ip is not None:
+        for cidr in DIAGNOSTIC_HARD_DENIED_NETWORKS:
+            network = ipaddress.ip_network(cidr)
+            if ip.version == network.version and ip in network:
+                raise ValueError(
+                    f"Target {host!r} in {token!r} resolves to {ip}, inside "
+                    f"{cidr}, which is always refused for diagnostic pods "
+                    f"(cloud metadata / link-local / loopback — these return "
+                    f"instance credentials or expose node-local services). This is "
+                    f"not operator-configurable. Use run_kubectl_command (requires "
+                    f"human approval) if a human has judged this request safe."
+                )
+    return ip
+
+
+def _assert_target_in_scope(host: str, token: str, ip: Optional[Any]) -> None:
+    """
+    Raise ValueError if `host` is outside the configured target scope. Assumes
+    _assert_target_not_hard_denied has already passed for this host.
+    """
+    if ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS:
+        return
+    lowered = host.lower().rstrip(".")
+    if not lowered:
+        return
+
+    if ip is not None:
+        if ip.is_private:
+            return
+        raise ValueError(
+            f"Target {host!r} in {token!r} is outside the cluster. Diagnostic pods "
+            f"are restricted to in-cluster targets so an auto-approved probe cannot "
+            f"send cluster data to an external host. Set "
+            f"KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS=true to permit external "
+            f"probing, or use run_kubectl_command (requires human approval)."
+        )
+
+    if not _HOSTNAME_RE.match(lowered):
+        return  # not a host at all (e.g. a header value, a format string)
+
+    if _is_internal_hostname(lowered):
+        return
+    raise ValueError(
+        f"Target {host!r} in {token!r} is not a recognised cluster-internal name. "
+        f"Diagnostic pods are restricted to in-cluster targets so an auto-approved "
+        f"probe cannot send cluster data to an external host. Use the fully-qualified "
+        f"service name (e.g. 'svc.namespace.svc.cluster.local'), or set "
+        f"KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS=true to permit external probing, "
+        f"or use run_kubectl_command (requires human approval)."
+    )
+
+
+def _assert_no_redirect_following(command: List[str]) -> None:
+    """
+    Refuse explicit redirect-following for HTTP clients.
+
+    Following a redirect makes the effective target server-controlled: an
+    in-cluster service can 302 to 169.254.169.254 and defeat the target checks
+    above. Note wget follows redirects by default and cannot be argument-checked
+    this way — that residual case is what the egress NetworkPolicy covers.
+    """
+    if not command or command[0] not in DIAGNOSTIC_HTTP_CLIENTS:
+        return
+    for token in command:
+        base = token.split("=", 1)[0]
+        if token in DIAGNOSTIC_REDIRECT_FLAGS or base in DIAGNOSTIC_REDIRECT_FLAGS:
+            raise ValueError(
+                f"Flag {token!r} is not permitted for diagnostic pods: following a "
+                f"redirect lets the responding server choose the real target (e.g. a "
+                f"302 to the metadata service). Re-run without it, or use "
+                f"run_kubectl_command (requires human approval)."
+            )
+        # Bundled short flags, e.g. `curl -fsSL <url>`.
+        if re.fullmatch(r"-[A-Za-z]{2,}", token) and "L" in token[1:]:
+            raise ValueError(
+                f"Flag {token!r} bundles '-L' (follow redirects), which is not "
+                f"permitted for diagnostic pods: it lets the responding server choose "
+                f"the real target. Re-run without '-L', or use run_kubectl_command "
+                f"(requires human approval)."
+            )
+
+
+def validate_diagnostic_command(command: List[str]) -> None:
+    """
+    Validate the in-pod argv of a diagnostic image against the target policy.
+
+    Raises ValueError on the first refused token. Called by
+    run_preapproved_diagnostic_image before anything is executed.
+
+    Hard denials are checked across every token before the configurable
+    target-scope check, so a command that names both an external host and a
+    metadata address is refused with the metadata reason rather than whichever
+    token happened to come first.
+    """
+    _assert_no_redirect_following(command)
+    candidates = [
+        (token, host)
+        for token in command
+        for host in _candidate_target_hosts(token)
+    ]
+    resolved = [
+        (token, host, _assert_target_not_hard_denied(host, token))
+        for token, host in candidates
+    ]
+    for token, host, ip in resolved:
+        _assert_target_in_scope(host, token, ip)
 
 
 def _normalize_path(path: str) -> str:
@@ -529,6 +875,15 @@ def run_preapproved_kubectl_exec_command(
         "nslookup, iperf), busybox (ls, cat, ps, wget, nslookup), curlimages/curl "
         "(HTTP/endpoint reachability). A non-allowlisted image returns a structured "
         "refusal listing the allowed images and pointing to run_kubectl_command.\n\n"
+        "TARGETS ARE RESTRICTED. Probes must point at in-cluster targets: a bare "
+        "service name, a name under .svc/.cluster.local, or a private IP. Cloud "
+        "metadata and link-local/loopback addresses (169.254.0.0/16, "
+        "metadata.google.internal, 127.0.0.0/8, ...) are refused in every spelling "
+        "and cannot be re-enabled by an operator. Redirect-following (curl -L) is "
+        "refused because it hands target selection to the responding server. "
+        "External targets are refused unless the operator enabled them. Use the "
+        "FQDN if a short name is refused; use run_kubectl_command (human approval) "
+        "when a probe genuinely needs a restricted target.\n\n"
         "Example: run_preapproved_diagnostic_image(image=\"nicolaka/netshoot\", namespace=\"prod\", command=[\"dig\",\"my-svc\"])"
     ),
 )
@@ -558,6 +913,10 @@ def run_preapproved_diagnostic_image(
             # leading '-' is legitimate here (e.g. curl -s); only block shell chars.
             for part in command:
                 _reject_shell_chars(part, "command")
+            # Shell-char rejection does not constrain *where* the probe points:
+            # ':' '/' '.' '?' '=' are all legal, so a URL passes it untouched.
+            # Enforce the target policy before anything runs (ROB-910).
+            validate_diagnostic_command(command)
         if name:
             _validate_identifier(name, "name")
             pod_name = name
@@ -578,9 +937,23 @@ def run_preapproved_diagnostic_image(
     #   - memory limit + requests                cap node impact; NO cpu limit so
     #     throughput tests (iperf) aren't throttled, and capabilities are left
     #     untouched so tcpdump/ping still work.
+    #   - hostNetwork/hostPID/hostIPC: false   a hostNetwork pod is exempt from
+    #     NetworkPolicy and shares the node's stack, which would defeat the
+    #     egress policy below. These are already the defaults; pinned so the
+    #     containment does not rest on a default.
+    #   - label robusta.dev/diagnostic-pod     selected by the egress
+    #     NetworkPolicy in diagnostic-pod-networkpolicy.yaml, which denies
+    #     link-local/metadata and (by default) all non-cluster egress. That
+    #     policy is the CNI-enforced backstop for targets the argument checks
+    #     cannot see: a DNS name that only resolves to link-local inside the
+    #     pod, or wget following a redirect it was never told to follow.
     overrides = {
+        "metadata": {"labels": {"robusta.dev/diagnostic-pod": "true"}},
         "spec": {
             "automountServiceAccountToken": False,
+            "hostNetwork": False,
+            "hostPID": False,
+            "hostIPC": False,
             "containers": [
                 {
                     "name": pod_name,
@@ -642,6 +1015,10 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
         "dangerous_flags": sorted(DANGEROUS_FLAGS),
         "preapproved_exec_binaries": sorted(PREAPPROVED_EXEC_BINARIES),
         "diagnostic_images": list(DIAGNOSTIC_IMAGES),
+        "diagnostic_allow_external_targets": ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS,
+        "diagnostic_internal_dns_suffixes": list(DIAGNOSTIC_INTERNAL_DNS_SUFFIXES),
+        "diagnostic_hard_denied_networks": list(DIAGNOSTIC_HARD_DENIED_NETWORKS),
+        "diagnostic_hard_denied_hostnames": sorted(DIAGNOSTIC_HARD_DENIED_HOSTNAMES),
         "file_read_allowed_paths": list(FILE_READ_ALLOWED_PATHS),
         "file_read_denied_paths": list(FILE_READ_DENIED_PATHS),
         "allow_arbitrary_kubectl_commands": ALLOW_ARBITRARY_COMMANDS,
@@ -704,6 +1081,12 @@ if __name__ == "__main__":
     logger.info(f"Dangerous flags: {sorted(DANGEROUS_FLAGS)}")
     logger.info(f"Pre-approved exec binaries: {sorted(PREAPPROVED_EXEC_BINARIES)}")
     logger.info(f"Diagnostic images: {DIAGNOSTIC_IMAGES}")
+    logger.info(
+        f"Diagnostic external targets allowed: {ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS}"
+    )
+    logger.info(
+        f"Diagnostic internal DNS suffixes: {DIAGNOSTIC_INTERNAL_DNS_SUFFIXES}"
+    )
     logger.info(f"File-read allowed paths: {FILE_READ_ALLOWED_PATHS}")
     logger.info(f"File-read denied paths: {FILE_READ_DENIED_PATHS}")
     logger.info(f"Allow arbitrary kubectl commands: {ALLOW_ARBITRARY_COMMANDS}")
