@@ -17,7 +17,7 @@ spec:
       serviceAccountName: kubernetes-remediation-mcp-sa
       containers:
       - name: mcp-server
-        image: me-west1-docker.pkg.dev/robusta-development/development/kubernetes-remediation:1.1.0
+        image: me-west1-docker.pkg.dev/robusta-development/development/kubernetes-remediation:1.2.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
@@ -57,6 +57,20 @@ spec:
 
         - name: LOG_LEVEL
           value: "INFO"
+
+        # STRONGLY RECOMMENDED: require a bearer token on every HTTP request.
+        # Without it, anyone who can reach port 8000 gets the full tool surface
+        # with this pod's ServiceAccount RBAC (the NetworkPolicy is the only
+        # other line of defense, and it is inert on non-enforcing CNIs).
+        # kubectl create secret generic kubernetes-remediation-mcp-auth \
+        #   --from-literal=token="$(openssl rand -hex 32)"
+        # Then send the same value from HolmesGPT via the toolset's
+        # extra_headers (see README "HTTP transport authentication").
+        # - name: MCP_AUTH_TOKEN
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: kubernetes-remediation-mcp-auth
+        #       key: token
 
         resources:
           requests:

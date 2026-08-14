@@ -13,6 +13,7 @@ import json
 from unittest.mock import patch
 
 import pytest
+from starlette.testclient import TestClient
 
 import kubernetes_remediation as k
 
@@ -388,3 +389,84 @@ def test_get_config_returns_effective_policy():
     }
     assert "run" in cfg["allowed_commands"]
     assert "/var/run/secrets/" in cfg["file_read_denied_paths"]
+
+
+# ── HTTP transport authentication ────────────────────────────────────────────
+#
+# These exercise the real ASGI app uvicorn would serve (build_http_app), via
+# starlette's TestClient. A request that clears auth reaches the MCP app and
+# gets an MCP-layer response (never 401); a request that doesn't is rejected
+# with 401 before any tool code runs.
+
+MCP_POST_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+}
+INITIALIZE_BODY = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "test", "version": "0"},
+    },
+}
+
+
+def _client(monkeypatch, token):
+    if token is None:
+        monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("MCP_AUTH_TOKEN", token)
+    return TestClient(k.build_http_app())
+
+
+def test_http_transport_requires_auth(monkeypatch):
+    """ROB-900: with MCP_AUTH_TOKEN set, unauthenticated tool-endpoint requests
+    are rejected before reaching the MCP app."""
+    with _client(monkeypatch, "s3cret") as client:
+        resp = client.post("/mcp", headers=MCP_POST_HEADERS, json=INITIALIZE_BODY)
+        assert resp.status_code == 401
+        assert resp.headers["www-authenticate"] == "Bearer"
+        assert "bearer token" in resp.json()["error"].lower()
+
+
+def test_http_transport_rejects_wrong_token(monkeypatch):
+    with _client(monkeypatch, "s3cret") as client:
+        resp = client.post(
+            "/mcp",
+            headers={**MCP_POST_HEADERS, "Authorization": "Bearer wrong"},
+            json=INITIALIZE_BODY,
+        )
+        assert resp.status_code == 401
+
+
+def test_http_transport_rejects_non_bearer_scheme(monkeypatch):
+    with _client(monkeypatch, "s3cret") as client:
+        resp = client.post(
+            "/mcp",
+            headers={**MCP_POST_HEADERS, "Authorization": "Basic s3cret"},
+            json=INITIALIZE_BODY,
+        )
+        assert resp.status_code == 401
+
+
+def test_http_transport_accepts_correct_token(monkeypatch):
+    with _client(monkeypatch, "s3cret") as client:
+        resp = client.post(
+            "/mcp",
+            headers={**MCP_POST_HEADERS, "Authorization": "Bearer s3cret"},
+            json=INITIALIZE_BODY,
+        )
+        assert resp.status_code == 200
+        assert "serverInfo" in resp.text
+
+
+def test_http_transport_unauthenticated_when_token_unset(monkeypatch):
+    """Backwards compatibility: no MCP_AUTH_TOKEN -> pre-1.2.0 behavior, the
+    endpoint answers without credentials (manual deployments keep working)."""
+    with _client(monkeypatch, None) as client:
+        resp = client.post("/mcp", headers=MCP_POST_HEADERS, json=INITIALIZE_BODY)
+        assert resp.status_code == 200
+        assert "serverInfo" in resp.text

@@ -34,6 +34,7 @@ Defense in depth (independent of approval):
 
 import os
 import subprocess
+import hmac
 import json
 import logging
 import posixpath
@@ -146,7 +147,82 @@ HARD_DENIED_PATHS = ["/proc", "/sys", "/dev"]
 
 
 # Create MCP server
-mcp = FastMCP(name="kubernetes-remediation", version="1.1.0")
+mcp = FastMCP(name="kubernetes-remediation", version="1.2.0")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP transport authentication
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BearerAuthMiddleware:
+    """ASGI middleware requiring `Authorization: Bearer <token>` on every request.
+
+    The HTTP transport exposes the full tool surface (including cluster
+    mutations via the pod's elevated ServiceAccount) to anyone who can reach
+    the socket, so callers must be authenticated server-side; the client-side
+    human-approval gate only binds callers that go through HolmesGPT.
+    Only the shared-token check lives here — everything else (verb allowlist,
+    flag blocklist, path policy) still runs in the tools themselves.
+    """
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self._expected = token.encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            await self.app(scope, receive, send)
+            return
+
+        provided = b""
+        for name, value in scope.get("headers", []):
+            if name.lower() == b"authorization":
+                scheme, _, credentials = value.partition(b" ")
+                if scheme.lower() == b"bearer":
+                    provided = credentials.strip()
+                break
+
+        if not hmac.compare_digest(provided, self._expected):
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+                return
+            body = json.dumps(
+                {"error": "Unauthorized: missing or invalid bearer token"}
+            ).encode()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                        (b"www-authenticate", b"Bearer"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        await self.app(scope, receive, send)
+
+
+def build_http_app():
+    """Build the ASGI app for the HTTP transport, wrapping it with bearer-token
+    auth when MCP_AUTH_TOKEN is set. Unset keeps the pre-1.2.0 behavior
+    (unauthenticated) so existing manual deployments don't break on upgrade."""
+    app = mcp.http_app()
+    token = os.getenv("MCP_AUTH_TOKEN", "")
+    if token:
+        logger.info("HTTP transport authentication enabled (MCP_AUTH_TOKEN is set)")
+        return BearerAuthMiddleware(app, token)
+    logger.warning(
+        "MCP_AUTH_TOKEN is not set — the HTTP transport accepts UNAUTHENTICATED "
+        "requests, giving anyone who can reach this port the full tool surface "
+        "with this pod's ServiceAccount RBAC. Set MCP_AUTH_TOKEN (the Holmes "
+        "Helm chart does this automatically) or restrict access with a "
+        "NetworkPolicy."
+    )
+    return app
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -724,6 +800,6 @@ if __name__ == "__main__":
             if port_idx < len(sys.argv):
                 port = int(sys.argv[port_idx])
 
-        uvicorn.run(mcp.http_app(), host=host, port=port, log_level="info")
+        uvicorn.run(build_http_app(), host=host, port=port, log_level="info")
     else:
         mcp.run()

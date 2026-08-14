@@ -80,6 +80,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `KUBECTL_ALLOW_ARBITRARY_COMMANDS` | `true` | enable the approval-gated fallback |
 | `KUBECTL_TIMEOUT` | `60` | per-command timeout (s) |
 | `LOG_LEVEL` | `INFO` | logging |
+| `MCP_AUTH_TOKEN` | *(unset)* | bearer token required on every HTTP-transport request; unset = unauthenticated (a startup warning is logged) |
 
 The diagnostic image allowlist matches on the **repository**; the server runs the
 pinned tag from the allowlist, so callers can just name the repo
@@ -89,7 +90,7 @@ pinned tag from the allowlist, so callers can just name the repo
 
 ```bash
 # 1. Build the Docker image
-docker build -t kubernetes-remediation-mcp:1.1.0 .
+docker build -t kubernetes-remediation-mcp:1.2.0 .
 
 # 2. Deploy the scoped RBAC (ServiceAccount + ClusterRole + binding, no cluster-admin)
 kubectl apply -f rbac.yaml
@@ -110,6 +111,35 @@ kubectl get pods -l app=kubernetes-remediation-mcp
 `secrets` is intentionally absent (defense in depth on top of the file-read
 denylist). For stricter or namespaced setups, replace it with your own
 `Role`/`ClusterRole`.
+
+## HTTP transport authentication
+
+With `--transport http` the server exposes its full tool surface — including
+cluster mutations running under the pod's elevated ServiceAccount — to anyone
+who can reach the port, and the human-approval gate for `run_kubectl_command`
+lives in the HolmesGPT client, so it only binds callers that go through
+HolmesGPT. Set `MCP_AUTH_TOKEN` to require `Authorization: Bearer <token>` on
+every request (compared in constant time; anything else gets `401`).
+
+The Holmes Helm chart (`mcpAddons.kubernetesRemediation`) generates a
+per-release token Secret and wires both sides automatically. For manual
+deployments, create a Secret and mount it on this pod as `MCP_AUTH_TOKEN`
+(see the commented block in `deployment.yaml`), then send the same value from
+Holmes via the toolset's `extra_headers`:
+
+```yaml
+mcp_servers:
+  kubernetes_remediation:
+    config:
+      url: "http://kubernetes-remediation-mcp.default.svc.cluster.local:8000/mcp"
+      mode: streamable-http
+      extra_headers:
+        Authorization: "Bearer {{ env.K8S_REMEDIATION_MCP_TOKEN }}"
+```
+
+When `MCP_AUTH_TOKEN` is unset the server behaves exactly as before (no
+authentication) so existing deployments keep working — but then a
+NetworkPolicy is the only thing between the port and the cluster.
 
 ## NetworkPolicy
 
