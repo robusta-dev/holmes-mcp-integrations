@@ -75,6 +75,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `KUBECTL_DANGEROUS_FLAGS` | `--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid` | Blocked flags |
 | `KUBECTL_PREAPPROVED_EXEC_BINARIES` | `ps,top,df,ls,netstat,ss` | `run_preapproved_kubectl_exec_command` binary allowlist (bare names, no patterns) |
 | `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_preapproved_diagnostic_image` allowlist |
+| `KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED` | `true` | master switch for the diagnostic target policy; `false` disables **all** target checks (see warning below) |
 | `KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS` | `false` | allow diagnostic probes to target hosts outside the cluster |
 | `KUBECTL_DIAGNOSTIC_INTERNAL_DNS_SUFFIXES` | `.svc,.svc.cluster.local,.cluster.local` | DNS suffixes counted as cluster-internal |
 | `KUBECTL_FILE_READ_ALLOWED_PATHS` | `/` | `read_file_from_container` allow roots |
@@ -144,6 +145,31 @@ does not depend on parsing.
 
 When a probe genuinely needs a restricted target, route it through
 `run_kubectl_command`, which requires human approval.
+
+### Escape hatch: disabling the target policy
+
+`KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED=false` turns the whole layer-1 policy
+off, for environments it misjudges — a cluster domain the suffix list can't
+express, or an appliance that genuinely lives on a public address.
+
+> **This disables every target check, including the metadata ranges that are
+> otherwise not operator-configurable, and restores the pre-fix behaviour: an
+> auto-approved probe can then be aimed at the cloud metadata service and its
+> response returned to the agent.** The server logs a warning at startup and on
+> every call while it is off.
+
+Try these first, in order:
+
+1. `KUBECTL_DIAGNOSTIC_INTERNAL_DNS_SUFFIXES` — if the problem is a custom cluster domain.
+2. `KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS=true` — if the problem is legitimate external probing. Metadata/link-local stays denied.
+3. `run_kubectl_command` — for a one-off that a human approves.
+
+Only reach for the master switch if none of those fit. Disabling layer 1 makes
+the egress NetworkPolicy your only remaining control, so apply it first if you
+go this route.
+
+The other guards are unaffected by this switch: the image allowlist,
+shell-metacharacter rejection, and the flag-injection check still apply.
 
 ## Quick Start
 

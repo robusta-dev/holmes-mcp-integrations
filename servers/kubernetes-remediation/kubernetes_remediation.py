@@ -128,9 +128,23 @@ DIAGNOSTIC_IMAGES = _split_csv(
 #
 # Targets are classified as cluster-internal or external. External targets are
 # refused unless the operator opts in here; link-local/metadata/loopback are
-# refused unconditionally (see DIAGNOSTIC_HARD_DENIED_* below).
+# refused unconditionally by the policy (see DIAGNOSTIC_HARD_DENIED_* below).
 ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS = _env_bool(
     "KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS", False
+)
+
+# Master switch for the whole target policy. Escape hatch for operators whose
+# environment the policy misjudges (a custom cluster domain the suffix list can't
+# express, probing an appliance on a public address, etc.).
+#
+# Setting this false turns off *every* target check, including the
+# unconditionally-denied metadata ranges, and restores the pre-ROB-910 behaviour:
+# an auto-approved probe can then be aimed at the cloud metadata service and its
+# response returned to the agent. Prefer the narrower
+# KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS, or route the specific call through
+# the approval-gated run_kubectl_command, before reaching for this.
+DIAGNOSTIC_TARGET_POLICY_ENABLED = _env_bool(
+    "KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED", True
 )
 
 # DNS suffixes treated as cluster-internal. Override for a custom cluster domain.
@@ -609,7 +623,19 @@ def validate_diagnostic_command(command: List[str]) -> None:
     target-scope check, so a command that names both an external host and a
     metadata address is refused with the metadata reason rather than whichever
     token happened to come first.
+
+    No-op when the operator has disabled the policy via
+    KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED=false.
     """
+    if not DIAGNOSTIC_TARGET_POLICY_ENABLED:
+        logger.warning(
+            "Diagnostic target policy is DISABLED "
+            "(KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED=false); running %r without "
+            "target validation. Cloud-metadata and external targets are reachable "
+            "from this auto-approved tool.",
+            command,
+        )
+        return
     _assert_no_redirect_following(command)
     candidates = [
         (token, host)
@@ -1015,6 +1041,7 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
         "dangerous_flags": sorted(DANGEROUS_FLAGS),
         "preapproved_exec_binaries": sorted(PREAPPROVED_EXEC_BINARIES),
         "diagnostic_images": list(DIAGNOSTIC_IMAGES),
+        "diagnostic_target_policy_enabled": DIAGNOSTIC_TARGET_POLICY_ENABLED,
         "diagnostic_allow_external_targets": ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS,
         "diagnostic_internal_dns_suffixes": list(DIAGNOSTIC_INTERNAL_DNS_SUFFIXES),
         "diagnostic_hard_denied_networks": list(DIAGNOSTIC_HARD_DENIED_NETWORKS),
@@ -1081,6 +1108,16 @@ if __name__ == "__main__":
     logger.info(f"Dangerous flags: {sorted(DANGEROUS_FLAGS)}")
     logger.info(f"Pre-approved exec binaries: {sorted(PREAPPROVED_EXEC_BINARIES)}")
     logger.info(f"Diagnostic images: {DIAGNOSTIC_IMAGES}")
+    if DIAGNOSTIC_TARGET_POLICY_ENABLED:
+        logger.info("Diagnostic target policy: ENABLED")
+    else:
+        logger.warning(
+            "Diagnostic target policy: DISABLED via "
+            "KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED=false. The auto-approved "
+            "run_preapproved_diagnostic_image tool can be pointed at cloud-metadata "
+            "endpoints and external hosts (ROB-910). Re-enable unless you have a "
+            "specific reason not to."
+        )
     logger.info(
         f"Diagnostic external targets allowed: {ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS}"
     )

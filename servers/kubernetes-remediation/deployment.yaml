@@ -48,6 +48,12 @@ spec:
         # link-local/loopback ranges are refused either way (not configurable).
         # Pair with diagnostic-pod-networkpolicy.yaml, applied to every namespace
         # diagnostics may run in — that is the CNI-enforced backstop.
+        # Master switch. "false" disables ALL target checks (including the
+        # metadata ranges) and restores the pre-fix behaviour — escape hatch for
+        # environments the policy misjudges. Prefer the two narrower knobs.
+        - name: KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED
+          value: "true"
+
         - name: KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS
           value: "false"
 
