@@ -48,6 +48,10 @@
 # the ipBlock cidr to 0.0.0.0/0 but KEEP every `except` entry — those are the
 # ranges the server refuses unconditionally, and this policy should not be looser
 # than the server it backs up.
+#
+# Every egress rule must be scoped with a `to:`. A rule carrying only `ports`
+# matches every destination on those ports, which is how an "allow DNS" rule
+# silently becomes "allow exfiltration over port 53".
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -61,10 +65,25 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # Cluster DNS, so service names still resolve. Port-only rule: kube-dns sits
-    # in kube-system, which a namespaceSelector cannot match without a label that
-    # is not guaranteed to be present.
-    - ports:
+    # Cluster DNS, so service names still resolve.
+    #
+    # This rule MUST carry a `to:`. An egress rule with `ports` but no `to`
+    # matches ALL destinations on those ports — port 53 open to the whole
+    # internet, which turns DNS into an exfiltration channel (queries to an
+    # attacker-controlled resolver carry data in the QNAME) and defeats the
+    # point of this policy. `kubernetes.io/metadata.name` is applied to every
+    # namespace automatically from Kubernetes 1.21, so selecting kube-system
+    # by name is reliable; CoreDNS carries `k8s-app: kube-dns` on both kubeadm
+    # and k3s. namespaceSelector and podSelector in the same list item are
+    # ANDed (kube-dns pods, in kube-system).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
@@ -72,6 +91,11 @@ spec:
 
     # In-cluster (RFC1918) destinations only. None of the hard-denied ranges fall
     # inside these blocks, so no `except` entries are needed here.
+    #
+    # This also covers DNS addressed to the kube-dns Service ClusterIP on CNIs
+    # that evaluate policy before kube-proxy's DNAT (the pod-selector rule above
+    # covers the post-DNAT case). If your Service CIDR is outside RFC1918, add it
+    # as an ipBlock here or DNS resolution will break.
     - to:
         - ipBlock:
             cidr: 10.0.0.0/8
