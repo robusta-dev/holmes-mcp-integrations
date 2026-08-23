@@ -29,12 +29,22 @@ RUN NODE_VERSION=20.20.2 && \
     node --version
 
 # Update npm to latest version for CVE handling, then patch npm's bundled deps:
-# - minimatch, tar: general updates
+# - minimatch: general updates
 # - picomatch (CVE-2026-33671)
-# - brace-expansion (CVE-2026-33750)
-RUN npm install -g npm@latest && \
+# - brace-expansion (CVE-2026-33750, CVE-2026-14257, CVE-2026-69152 → >=5.0.9)
+# - tar (CVE-2026-73566 → >=7.5.21)
+# - ip-address (CVE-2026-69192 → >=10.3.1), reached via npm's socks-proxy-agent
+# - undici (CVE-2026-15157, CVE-2026-16728, CVE-2026-16729 → >=6.28.0). Held to the
+#   6.x line to match the range npm declares for its own bundled copy.
+#
+# npm itself is held at the 11.x line: npm 12 requires node "^22.22.2 || ^24.15.0 ||
+# >=26", so `npm@latest` now fails EBADENGINE against the node 20.20.2 pinned above
+# and the image no longer builds. Lift this pin when node here is bumped to >= 22.
+RUN npm install -g "npm@^11" && \
     cd /tmp && \
-    npm pack minimatch@latest && npm pack tar@latest && npm pack picomatch@latest && npm pack brace-expansion@latest && \
+    npm pack minimatch@latest && npm pack tar@latest && npm pack picomatch@latest && \
+    npm pack brace-expansion@latest && npm pack ip-address@latest && \
+    npm pack "undici@^6.28.0" && \
     cd /usr/local/lib/node_modules/npm/node_modules/minimatch && \
     tar xzf /tmp/minimatch-*.tgz --strip-components=1 && \
     cd /usr/local/lib/node_modules/npm/node_modules/tar && \
@@ -43,6 +53,10 @@ RUN npm install -g npm@latest && \
     tar xzf /tmp/picomatch-*.tgz --strip-components=1 && \
     cd /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
     tar xzf /tmp/brace-expansion-*.tgz --strip-components=1 && \
+    cd /usr/local/lib/node_modules/npm/node_modules/ip-address && \
+    tar xzf /tmp/ip-address-*.tgz --strip-components=1 && \
+    cd /usr/local/lib/node_modules/npm/node_modules/undici && \
+    tar xzf /tmp/undici-*.tgz --strip-components=1 && \
     rm -rf /tmp/*.tgz
 
 # Update vulnerable dependencies in supergateway:
@@ -51,9 +65,16 @@ RUN npm install -g npm@latest && \
 # - qs (CVE-2025-15284)
 # - cross-spawn (CVE-2024-21538)
 # - esbuild 0.27.7 → 0.28.1 (GHSA-gv7w-rqvm-qjhr)
+# - brace-expansion (CVE-2026-14257, CVE-2026-69152 → >=5.0.9)
+# - tar (CVE-2026-73566 → >=7.5.21)
+# - ip-address (CVE-2026-69192 → >=10.3.1)
+# - fast-uri (CVE-2026-16221 → >=3.1.4, CVE-2026-18446 → >=3.1.5), pulled in by ajv.
+#   Held to the 3.x line on purpose: ajv declares fast-uri "^3.0.1", so installing
+#   4.x here would leave ajv resolving its own vulnerable nested copy again.
 RUN cd /usr/local/lib/node_modules/supergateway && \
     npm install @modelcontextprotocol/sdk@latest @isaacs/brace-expansion@latest qs@latest \
-    minimatch@latest tar@latest cross-spawn@latest esbuild@latest && \
+    minimatch@latest tar@latest cross-spawn@latest esbuild@latest \
+    brace-expansion@latest ip-address@latest "fast-uri@^3.1.5" && \
     sed -i 's/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@[^"]*"/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@latest"/' package.json && \
     npm install && \
     npm audit fix --force || true
