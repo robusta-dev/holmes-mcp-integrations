@@ -1,0 +1,90 @@
+# Egress NetworkPolicy for the short-lived pods created by the AUTO-APPROVED
+# `run_preapproved_diagnostic_image` tool.
+#
+# WHY THIS EXISTS
+# ---------------
+# The diagnostic images are network-probing tools (curl/dig/wget/tcpdump) and the
+# tool that launches them runs without human approval, so prompt-injected agent
+# output chooses the probe target. The server validates those targets in
+# kubernetes_remediation.py, but argument validation cannot see:
+#
+#   - a DNS name that only resolves to a metadata address inside the pod,
+#   - a redirect chosen by the responding server (wget follows redirects by
+#     default and has no flag we can require),
+#   - an IP spelling we failed to anticipate.
+#
+# This policy is the CNI-enforced backstop for those cases. The two layers are
+# complementary: the server's checks produce a legible refusal the agent can
+# correct, this policy produces containment that does not depend on parsing.
+#
+# HOW THE POD IS SELECTED
+# -----------------------
+# The server stamps every diagnostic pod with `robusta.dev/diagnostic-pod: "true"`
+# and pins hostNetwork:false (a hostNetwork pod is exempt from NetworkPolicy).
+# Nothing else should carry that label.
+#
+# DEPLOYMENT — READ THIS
+# ----------------------
+# NetworkPolicy is NAMESPACED. This manifest only protects diagnostic pods in the
+# namespace it is applied to, and `run_preapproved_diagnostic_image` takes the
+# namespace from the caller. Apply it to every namespace the agent may run
+# diagnostics in, or restrict the server's RBAC to namespaces where it is applied.
+# A namespace without this policy falls back to the server-side argument checks
+# alone.
+#
+# It is also inert where the CNI does not enforce NetworkPolicy (e.g. plain
+# Flannel). Verify enforcement before relying on it:
+#
+#   kubectl run np-test --rm -i --restart=Never -n <ns> \
+#     --image=curlimages/curl:8.11.1 \
+#     --overrides='{"metadata":{"labels":{"robusta.dev/diagnostic-pod":"true"}}}' \
+#     -- curl -s -m 5 http://169.254.169.254/    # must time out, not answer
+#
+# TUNING
+# ------
+# The egress rules below allow cluster DNS and RFC1918 destinations minus the
+# denied ranges, which matches the server's default
+# KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS=false. If you set that to true, widen
+# the ipBlock cidr to 0.0.0.0/0 but KEEP every `except` entry — those are the
+# ranges the server refuses unconditionally, and this policy should not be looser
+# than the server it backs up.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubernetes-remediation-diagnostic-pod-egress
+  labels:
+    app: kubernetes-remediation-mcp
+spec:
+  podSelector:
+    matchLabels:
+      robusta.dev/diagnostic-pod: "true"
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS, so service names still resolve. Port-only rule: kube-dns sits
+    # in kube-system, which a namespaceSelector cannot match without a label that
+    # is not guaranteed to be present.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # In-cluster (RFC1918) destinations only. None of the hard-denied ranges fall
+    # inside these blocks, so no `except` entries are needed here.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+        - ipBlock:
+            cidr: 172.16.0.0/12
+        - ipBlock:
+            cidr: 192.168.0.0/16
+      # No ports: any port to in-cluster addresses (probing arbitrary service
+      # ports is the point of the tool).
+
+    # NOTE: 169.254.0.0/16 (cloud metadata, ECS task metadata), 127.0.0.0/8,
+    # 0.0.0.0/8, 100.100.100.200/32 (Alibaba) and 192.0.0.192/32 (Oracle) are
+    # absent from every `to:` above, so they are denied by default — an egress
+    # policy denies whatever it does not allow. They are listed here rather than
+    # in an `except` because there is no deny rule in NetworkPolicy; do not add a
+    # broader cidr above without re-adding them as `except` entries.
