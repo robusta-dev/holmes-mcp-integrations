@@ -1,7 +1,7 @@
 # Google Cloud Observability MCP Server with Supergateway
 # Uses Supergateway base image to convert STDIO MCP to HTTP/SSE API
 
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:0.1.5
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:0.1.6
 
 # Switch to root to install dependencies
 USER root
@@ -12,8 +12,27 @@ RUN apk add --no-cache \
     bash \
     curl
 
-# Pre-install the observability MCP package to cache it
-RUN npx -y @google-cloud/observability-mcp --version || true
+# Refresh anything the base layer left stale, notably c-ares (CVE-2026-33630)
+# and curl/libcurl (CVE-2026-5545). Runs after apk add so the packages installed
+# just above are covered too.
+RUN apk upgrade --no-cache
+
+# Install the MCP server at build time instead of resolving it with `npx -y` on
+# every container start. `npx -y` re-resolves the package against the registry
+# when the container boots, which reinstalls the dependency tree and silently
+# undoes the CVE patches applied below -- so the tree that ships in the image has
+# to be the tree that runs. It also means startup no longer depends on
+# registry.npmjs.org being reachable. Matches how servers/sentry does it.
+RUN npm install -g @google-cloud/observability-mcp
+
+# Patch vulnerable transitive deps in the installed MCP server tree. These come
+# from @modelcontextprotocol/sdk and ajv, which the MCP package pins:
+# - fast-uri 3.1.3 → 3.1.5 (CVE-2026-16221, CVE-2026-18446)
+# - ip-address 10.2.0 → 10.3.1 (CVE-2026-69192, CVE-2026-54272, CVE-2026-69198)
+# - hono 4.12.27 → 4.12.34 (CVE-2026-69207, CVE-2026-71848, CVE-2026-71850)
+# - @hono/node-server 1.19.14 → 1.19.15 (GHSA-frvp-7c67-39w9)
+RUN /usr/local/bin/patch-node-deps.sh /usr/local/lib/node_modules/@google-cloud/observability-mcp \
+    fast-uri@^3.1.5 ip-address@^10.3.1 hono@^4.12.34 @hono/node-server@^1.19.15
 
 # Switch back to node user for security
 USER node
@@ -22,4 +41,4 @@ USER node
 EXPOSE 8001
 
 # Run Supergateway with observability-mcp as the stdio process
-CMD ["--port", "8001", "--stdio", "npx -y @google-cloud/observability-mcp"]
+CMD ["--port", "8001", "--stdio", "observability-mcp"]

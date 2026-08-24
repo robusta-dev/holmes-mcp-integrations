@@ -28,11 +28,19 @@ RUN NODE_VERSION=20.20.2 && \
     rm /tmp/node.tar.gz && \
     node --version
 
-# Update npm to latest version for CVE handling, then patch npm's bundled deps:
+# Update npm, then patch npm's bundled deps.
+# npm is held at ^11 rather than @latest: npm 12 requires Node
+# ^22.22.2 || ^24.15.0 || >=26.0.0, and this image pins Node 20.20.2 above, so
+# `npm@latest` now fails the build outright with EBADENGINE. 11.x is the newest
+# line that still supports Node 20 (engines: ^20.17.0 || >=22.9.0). The npm
+# version does not affect the CVE fixes below — those are applied explicitly.
+# TODO: move this image to a supported Node LTS (Node 20 went EOL 2026-04-30),
+# then drop the ^11 pin.
+# Patched here:
 # - minimatch, tar: general updates
 # - picomatch (CVE-2026-33671)
 # - brace-expansion (CVE-2026-33750)
-RUN npm install -g npm@latest && \
+RUN npm install -g npm@^11 && \
     cd /tmp && \
     npm pack minimatch@latest && npm pack tar@latest && npm pack picomatch@latest && npm pack brace-expansion@latest && \
     cd /usr/local/lib/node_modules/npm/node_modules/minimatch && \
@@ -51,12 +59,33 @@ RUN npm install -g npm@latest && \
 # - qs (CVE-2025-15284)
 # - cross-spawn (CVE-2024-21538)
 # - esbuild 0.27.7 → 0.28.1 (GHSA-gv7w-rqvm-qjhr)
+# - fast-uri 3.1.3 → 3.1.5 (CVE-2026-16221, CVE-2026-18446)
+# - ip-address 10.2.0 → 10.3.1 (CVE-2026-69192, CVE-2026-54272, CVE-2026-69198)
+# - hono 4.12.27 → 4.12.34 (CVE-2026-69207, CVE-2026-71848, CVE-2026-71850)
+# - @hono/node-server 1.19.14 → 1.19.15 (GHSA-frvp-7c67-39w9)
+# hono/@hono/node-server are held on their current major on purpose: the
+# supergateway 3.4.3 patch scripts below are version-pinned against that tree,
+# and 1.19.15 / 4.12.34 already carry the fixes.
 RUN cd /usr/local/lib/node_modules/supergateway && \
     npm install @modelcontextprotocol/sdk@latest @isaacs/brace-expansion@latest qs@latest \
-    minimatch@latest tar@latest cross-spawn@latest esbuild@latest && \
+    minimatch@latest tar@latest cross-spawn@latest esbuild@latest \
+    fast-uri@^3.1.5 ip-address@^10.3.1 hono@^4.12.34 @hono/node-server@^1.19.15 && \
     sed -i 's/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@[^"]*"/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@latest"/' package.json && \
     npm install && \
     npm audit fix --force || true
+
+# Patch npm's bundled deps that `npm install -g npm@latest` still ships stale:
+# - ip-address 10.2.0 → 10.3.1 (CVE-2026-69192, CVE-2026-54272, CVE-2026-69198)
+# - undici 6.27.0 → 6.28.0 (CVE-2026-15157, CVE-2026-16728, CVE-2026-16729)
+# Both stay on their current major so npm itself keeps working.
+RUN cd /tmp && \
+    npm pack ip-address@^10.3.1 && npm pack undici@^6.28.0 && \
+    for pkg in ip-address undici; do \
+        for dir in $(find /usr/local/lib/node_modules -type d -name "$pkg" 2>/dev/null); do \
+            tar xzf /tmp/"$pkg"-*.tgz --strip-components=1 -C "$dir" 2>/dev/null || true; \
+        done; \
+    done && \
+    rm -rf /tmp/*.tgz
 
 # Also update cross-spawn in npm's global node_modules (CVE-2024-21538)
 RUN cd /tmp && npm pack cross-spawn@latest && \
@@ -64,6 +93,11 @@ RUN cd /tmp && npm pack cross-spawn@latest && \
         tar xzf /tmp/cross-spawn-*.tgz --strip-components=1 -C "$dir" 2>/dev/null || true; \
     done && \
     rm -rf /tmp/*.tgz
+
+# Ship a helper child images use to swap vulnerable transitive deps out of an
+# already-installed MCP server tree (npm -g install or npx prewarm cache).
+COPY patch-node-deps.sh /usr/local/bin/patch-node-deps.sh
+RUN chmod +x /usr/local/bin/patch-node-deps.sh
 
 # Fix child process leak in stateless streamableHttp mode.
 # Every POST spawns a stdio child that is never killed after the response
