@@ -33,7 +33,7 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 |------|--------------|-------------|
 | `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied. |
 | `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist — only `command[0]` is checked, exactly. |
-| `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag). |
+| `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped, not host-networked) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag) **and a target policy** — see [Diagnostic-pod target policy](#diagnostic-pod-target-policy). |
 | `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
 
 `run_preapproved_kubectl_exec_command` deliberately excludes `cat` (use
@@ -63,7 +63,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 |------|----------|----------|----------------|
 | `read_file_from_container` | No | Auto | server path policy |
 | `run_preapproved_kubectl_exec_command` | No | Auto | server binary allowlist |
-| `run_preapproved_diagnostic_image` | No (data-gathering pod) | Auto | server image allowlist |
+| `run_preapproved_diagnostic_image` | No (data-gathering pod) | Auto | server image allowlist + target policy + egress NetworkPolicy |
 | `get_remediation_mcp_config` | No | Auto | — |
 | `run_kubectl_command` | Yes | **Human approval** | HolmesGPT `approval_required_tools` + server guards |
 
@@ -75,6 +75,9 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `KUBECTL_DANGEROUS_FLAGS` | `--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid` | Blocked flags |
 | `KUBECTL_PREAPPROVED_EXEC_BINARIES` | `ps,top,df,ls,netstat,ss` | `run_preapproved_kubectl_exec_command` binary allowlist (bare names, no patterns) |
 | `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_preapproved_diagnostic_image` allowlist |
+| `KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED` | `true` | master switch for the diagnostic target policy; `false` disables **all** target checks (see warning below) |
+| `KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS` | `false` | allow diagnostic probes to target hosts outside the cluster |
+| `KUBECTL_DIAGNOSTIC_INTERNAL_DNS_SUFFIXES` | `.svc,.svc.cluster.local,.cluster.local` | DNS suffixes counted as cluster-internal |
 | `KUBECTL_FILE_READ_ALLOWED_PATHS` | `/` | `read_file_from_container` allow roots |
 | `KUBECTL_FILE_READ_DENIED_PATHS` | `/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/` | secret-mount denylist |
 | `KUBECTL_ALLOW_ARBITRARY_COMMANDS` | `true` | enable the approval-gated fallback |
@@ -85,6 +88,89 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 The diagnostic image allowlist matches on the **repository**; the server runs the
 pinned tag from the allowlist, so callers can just name the repo
 (`run_preapproved_diagnostic_image(image="nicolaka/netshoot", ...)`).
+
+## Diagnostic-pod target policy
+
+`run_preapproved_diagnostic_image` is auto-approved and the allowlisted images
+are network-probing tools (`curl`, `dig`, `wget`, `tcpdump`). The image allowlist
+constrains *what runs*; it says nothing about *where the probe points*. Shell-char
+rejection does not help either — `:` `/` `.` `?` `=` are all legal characters, so
+a URL passes it untouched. Without a target policy, prompt-injected agent output
+could aim an auto-approved probe at the cloud metadata service and read instance
+credentials back, or POST cluster data to an external collector (ROB-910).
+
+Two independent layers now constrain the target.
+
+**1. Server-side argument checks** (`validate_diagnostic_command`), before
+anything executes:
+
+- **Always refused, not operator-configurable:** cloud metadata and
+  link-local/loopback destinations — `169.254.0.0/16` (AWS/Azure/OpenStack IMDS,
+  ECS task metadata), `127.0.0.0/8`, `0.0.0.0/8`, `100.100.100.200` (Alibaba),
+  `192.0.0.192` (Oracle), `::1`, `fe80::/10`, `fd00:ec2::254`, and the metadata
+  hostnames (`metadata.google.internal`, `metadata.goog`, `metadata`,
+  `instance-data`). Recognised in **every IPv4 spelling** `inet_aton` accepts, so
+  `http://2852039166/`, `http://0xA9FEA9FE/`, `http://0251.0376.0251.0376/` and
+  `http://[::ffff:169.254.169.254]/` are all caught. URL userinfo is stripped
+  first, so `http://harmless.example.com@169.254.169.254/` is judged on the real
+  host.
+- **Refused unless the operator opts in:** any target outside the cluster
+  (`KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS=false` by default). This is what
+  stops outbound exfiltration. Every token is inspected, not just the URL, so a
+  proxy flag (`-x http://collector`, `--proxy=socks5://collector`) and `dig`'s
+  `@server` syntax are covered — those change where the connection really goes.
+- **Refused always:** explicit redirect-following (`curl -L`, `--location`,
+  `--location-trusted`, and bundled forms like `-fsSL`), because a 302 lets the
+  responding server pick the final target.
+
+Cluster-internal means a bare service name, a name under a configured suffix
+(`.svc`, `.cluster.local`), or a private (RFC1918) address. Namespace-qualified
+shortcuts like `kubernetes.default` are **not** recognised — by shape they are
+indistinguishable from `evil.com` — so use the FQDN
+(`kubernetes.default.svc.cluster.local`). Refusals name the rule and the fix.
+
+**2. An egress NetworkPolicy** — `diagnostic-pod-networkpolicy.yaml`. The server
+labels every diagnostic pod `robusta.dev/diagnostic-pod: "true"` and pins
+`hostNetwork: false` (a host-networked pod is exempt from NetworkPolicy). The
+policy allows cluster DNS and RFC1918 egress only, so metadata/link-local is
+denied by the CNI regardless of what was requested.
+
+**Both layers are needed.** Argument checks cannot see a DNS name that only
+resolves to a metadata address *inside* the pod (e.g. wildcard DNS like
+`169.254.169.254.nip.io`), nor `wget`'s follow-redirects-by-default behaviour,
+which has no flag to key on. Those cases run, and the NetworkPolicy is what
+contains them. Conversely the NetworkPolicy is namespaced and inert on CNIs that
+do not enforce it, and it cannot give the agent a legible reason to correct
+itself. Layer 1 produces an actionable refusal; layer 2 produces containment that
+does not depend on parsing.
+
+When a probe genuinely needs a restricted target, route it through
+`run_kubectl_command`, which requires human approval.
+
+### Escape hatch: disabling the target policy
+
+`KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED=false` turns the whole layer-1 policy
+off, for environments it misjudges — a cluster domain the suffix list can't
+express, or an appliance that genuinely lives on a public address.
+
+> **This disables every target check, including the metadata ranges that are
+> otherwise not operator-configurable, and restores the pre-fix behaviour: an
+> auto-approved probe can then be aimed at the cloud metadata service and its
+> response returned to the agent.** The server logs a warning at startup and on
+> every call while it is off.
+
+Try these first, in order:
+
+1. `KUBECTL_DIAGNOSTIC_INTERNAL_DNS_SUFFIXES` — if the problem is a custom cluster domain.
+2. `KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS=true` — if the problem is legitimate external probing. Metadata/link-local stays denied.
+3. `run_kubectl_command` — for a one-off that a human approves.
+
+Only reach for the master switch if none of those fit. Disabling layer 1 makes
+the egress NetworkPolicy your only remaining control, so apply it first if you
+go this route.
+
+The other guards are unaffected by this switch: the image allowlist,
+shell-metacharacter rejection, and the flag-injection check still apply.
 
 ## Quick Start
 
@@ -100,7 +186,12 @@ kubectl apply -f deployment.yaml
 kubectl apply -f service.yaml
 kubectl apply -f networkpolicy.yaml
 
-# 4. Verify it's running
+# 4. Contain diagnostic pods' egress (metadata/link-local, external hosts).
+#    NetworkPolicy is namespaced: apply this to EVERY namespace the agent may
+#    run diagnostics in, not just the server's own namespace.
+kubectl apply -f diagnostic-pod-networkpolicy.yaml -n <namespace>
+
+# 5. Verify it's running
 kubectl get pods -l app=kubernetes-remediation-mcp
 ```
 
@@ -149,6 +240,26 @@ server → apiserver path. It is inert where the CNI doesn't enforce
 NetworkPolicy. Verify the HolmesGPT pod label matches your deployment before
 relying on enforcement.
 
+`diagnostic-pod-networkpolicy.yaml` is egress-only and applies to the short-lived
+pods created by `run_preapproved_diagnostic_image` (selected by the
+`robusta.dev/diagnostic-pod: "true"` label the server stamps on them). It allows
+cluster DNS and RFC1918 egress, which denies cloud metadata, link-local, loopback
+and the public internet. See [Diagnostic-pod target
+policy](#diagnostic-pod-target-policy) for why this is required alongside the
+server-side checks and not instead of them.
+
+Two deployment notes: NetworkPolicy is **namespaced**, so apply this manifest to
+every namespace diagnostics may run in (the tool takes the namespace from the
+caller); and it is inert on a CNI that does not enforce NetworkPolicy. Confirm
+enforcement before relying on it:
+
+```bash
+kubectl run np-test --rm -i --restart=Never -n <namespace> \
+  --image=curlimages/curl:8.11.1 \
+  --overrides='{"metadata":{"labels":{"robusta.dev/diagnostic-pod":"true"}}}' \
+  -- curl -s -m 5 http://169.254.169.254/    # must time out, not answer
+```
+
 ## Holmes integration
 
 ```yaml
@@ -186,7 +297,8 @@ kubernetes-remediation/
 ├── Dockerfile                       # Container image
 ├── deployment.yaml                  # Deployment + ConfigMap env
 ├── service.yaml                     # Service
-├── networkpolicy.yaml               # Ingress-only NetworkPolicy
+├── networkpolicy.yaml               # Ingress-only NetworkPolicy (MCP server)
+├── diagnostic-pod-networkpolicy.yaml # Egress NetworkPolicy for diagnostic pods
 ├── rbac.yaml                        # Scoped ServiceAccount/ClusterRole/binding
 └── README.md                        # This file
 ```

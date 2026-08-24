@@ -41,6 +41,26 @@ spec:
         - name: KUBECTL_DIAGNOSTIC_IMAGES
           value: "nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1"
 
+        # Diagnostic-pod target policy. Diagnostic images are network-probing tools
+        # and the tool is auto-approved, so targets are the security boundary.
+        # "false" restricts probes to in-cluster targets, so an auto-approved probe
+        # cannot ship cluster data to an external collector. Cloud-metadata and
+        # link-local/loopback ranges are refused either way (not configurable).
+        # Pair with diagnostic-pod-networkpolicy.yaml, applied to every namespace
+        # diagnostics may run in — that is the CNI-enforced backstop.
+        # Master switch. "false" disables ALL target checks (including the
+        # metadata ranges) and restores the pre-fix behaviour — escape hatch for
+        # environments the policy misjudges. Prefer the two narrower knobs.
+        - name: KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED
+          value: "true"
+
+        - name: KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS
+          value: "false"
+
+        # DNS suffixes counted as cluster-internal (set for a custom cluster domain)
+        - name: KUBECTL_DIAGNOSTIC_INTERNAL_DNS_SUFFIXES
+          value: ".svc,.svc.cluster.local,.cluster.local"
+
         # read_file_from_container path policy (allow roots minus secret/token mounts)
         - name: KUBECTL_FILE_READ_ALLOWED_PATHS
           value: "/"
