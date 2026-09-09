@@ -317,17 +317,17 @@ _GPU_UTIL_QUERY = (
     "memory.used,memory.total,clocks_throttle_reasons.active"
 )
 
-# Non-host checks. A list value is the container argv verbatim; a string value
-# runs under `sh -c` INSIDE the throwaway pod (needed for loops/pipes). Every
-# string is a server-owned constant — callers select by name only — so the
-# shell here is not an injection surface.
-GPU_CHECKS: Dict[str, Any] = {
+# Non-host checks. Each value is a shell fragment run under `sh -c` INSIDE the
+# throwaway pod; multiple requested checks are concatenated into one script so
+# a single pod answers them all. Every string is a server-owned constant —
+# callers select by name only — so the shell here is not an injection surface.
+GPU_CHECKS: Dict[str, str] = {
     # nvidia-smi: driver alive? temperature, power, memory, ECC summary, processes
-    "overview": ["nvidia-smi"],
+    "overview": "nvidia-smi",
     # full per-GPU detail: throttle reasons, ECC counts, retired pages, clocks
-    "details": ["nvidia-smi", "-q"],
+    "details": "nvidia-smi -q",
     # throttling investigation: temperature/power/clock sections only
-    "throttling": ["nvidia-smi", "-q", "-d", "TEMPERATURE,POWER,CLOCK"],
+    "throttling": "nvidia-smi -q -d TEMPERATURE,POWER,CLOCK",
     # ~30s of live samples (6 samples, 5s apart) to catch transient spikes
     "utilization_samples": (
         f"nvidia-smi {_GPU_UTIL_QUERY} --format=csv; "
@@ -335,17 +335,15 @@ GPU_CHECKS: Dict[str, Any] = {
         f"nvidia-smi {_GPU_UTIL_QUERY} --format=csv,noheader; done"
     ),
     # volatile + aggregate ECC error counts
-    "ecc": ["nvidia-smi", "-q", "-d", "ECC"],
+    "ecc": "nvidia-smi -q -d ECC",
     # retired pages (pending retirement => node needs a reboot)
-    "page_retirement": ["nvidia-smi", "-q", "-d", "PAGE_RETIREMENT"],
+    "page_retirement": "nvidia-smi -q -d PAGE_RETIREMENT",
     # A100/H100-generation equivalent of page retirement
-    "row_remapper": ["nvidia-smi", "-q", "-d", "ROW_REMAPPER"],
+    "row_remapper": "nvidia-smi -q -d ROW_REMAPPER",
     # which processes hold GPU memory (zombie/leak hunting)
-    "compute_processes": [
-        "nvidia-smi",
-        "--query-compute-apps=pid,process_name,used_memory",
-        "--format=csv",
-    ],
+    "compute_processes": (
+        "nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv"
+    ),
 }
 
 # DCGM check commands, run via `kubectl exec` in the node's DCGM DaemonSet pod
@@ -415,7 +413,7 @@ HOST_CHECKS: Dict[str, str] = {
         "if ls -l \"$p/fd\" 2>/dev/null | grep -q '/dev/nvidia'; then "
         "echo \"pid $(basename \"$p\") comm=$(cat \"$p/comm\" 2>/dev/null)\"; found=1; "
         "fi; done; "
-        "[ \"$found\" -eq 0 ] && echo 'no processes holding /dev/nvidia* devices'"
+        "if [ \"$found\" -eq 0 ]; then echo 'no processes holding /dev/nvidia* devices'; fi"
     ),
     # inspect one host process by pid ({pid} validated numeric)
     "process_info": (
@@ -1358,7 +1356,7 @@ def _build_node_diagnostic_overrides(
 
 def _run_node_diagnostic_pod(
     node: str,
-    check: str,
+    checks: List[str],
     image: str,
     argv: List[str],
     host_access: bool,
@@ -1395,10 +1393,10 @@ def _run_node_diagnostic_pod(
             text=True,
             timeout=TIMEOUT,
         )
-    # Context so the model (and logs) can tell which check on which node this
+    # Context so the model (and logs) can tell which checks on which node this
     # output belongs to, and self-correct on failure.
     result["node"] = node
-    result["check"] = check
+    result["checks"] = checks
     result["image"] = image
     return result
 
@@ -1410,8 +1408,26 @@ def _gpu_check_names() -> List[str]:
     return names
 
 
+def _build_multi_check_script(names: List[str], commands: Dict[str, str]) -> str:
+    """
+    Concatenate the requested checks into one shell script so a single pod (or
+    a single exec) answers them all. Each check prints a `===== <name> =====`
+    header before its output, a failing check does not stop the ones after it,
+    and the script exits non-zero if any check failed. All inputs are
+    server-owned constants (plus the already-validated pid/bus-id/diag-level
+    substitutions), so this is not an injection surface.
+    """
+    parts = ["failed=0"]
+    for name in names:
+        parts.append(f"echo '===== {name} ====='")
+        parts.append(f"{{ {commands[name]} ; }} || failed=1")
+        parts.append("echo")
+    parts.append("exit $failed")
+    return "\n".join(parts)
+
+
 def _run_dcgm_check_in_daemonset_pod(
-    node: str, check: str, script: str
+    node: str, checks: List[str], script: str
 ) -> Dict[str, Any]:
     """
     Run a dcgmi command in the node's EXISTING DCGM DaemonSet pod.
@@ -1429,7 +1445,7 @@ def _run_dcgm_check_in_daemonset_pod(
                 "so the node's DCGM DaemonSet pod cannot be located."
             ),
             "node": node,
-            "check": check,
+            "checks": checks,
         }
     lookup = _run_kubectl(
         [
@@ -1446,7 +1462,7 @@ def _run_dcgm_check_in_daemonset_pod(
     )
     if not lookup.get("success"):
         lookup["node"] = node
-        lookup["check"] = check
+        lookup["checks"] = checks
         lookup["error"] = (
             f"Failed to look up the DCGM DaemonSet pod on node {node!r} "
             f"(selector {GPU_DIAG_DCGM_POD_SELECTOR!r}): "
@@ -1467,7 +1483,7 @@ def _run_dcgm_check_in_daemonset_pod(
                 f"throttling, ecc, ...) work without DCGM."
             ),
             "node": node,
-            "check": check,
+            "checks": checks,
         }
     namespace, pod_name = pods[0].split("/", 1)
     result = _run_kubectl(
@@ -1475,7 +1491,7 @@ def _run_dcgm_check_in_daemonset_pod(
         timeout=GPU_DIAG_TIMEOUT,
     )
     result["node"] = node
-    result["check"] = check
+    result["checks"] = checks
     result["dcgm_pod"] = f"{namespace}/{pod_name}"
     return result
 
@@ -1483,11 +1499,13 @@ def _run_dcgm_check_in_daemonset_pod(
 @mcp.tool(
     name="run_gpu_node_diagnostics",
     description=(
-        "AUTO-APPROVED (runs immediately, no human needed). Run one named GPU "
-        "diagnostic check on a specific node, via a short-lived pod pinned to that "
-        "node that uses the node's own NVIDIA driver (no GPU is allocated, so this "
-        "works on fully-utilized nodes; the pod is auto-deleted).\n\n"
-        "Checks (pass the name as `check`):\n"
+        "AUTO-APPROVED (runs immediately, no human needed). Run one or more named "
+        "GPU diagnostic checks on a specific node, via a short-lived pod pinned to "
+        "that node that uses the node's own NVIDIA driver (no GPU is allocated, so "
+        "this works on fully-utilized nodes; the pod is auto-deleted). All requested "
+        "checks run in a single pod — prefer one call with several checks over "
+        "several calls.\n\n"
+        "Checks (pass a list of names as `checks`):\n"
         "- overview: nvidia-smi — is the driver alive; temperature, power, memory, processes\n"
         "- details: nvidia-smi -q — full per-GPU detail\n"
         "- throttling: temperature/power/clock sections and active throttle reasons\n"
@@ -1503,24 +1521,25 @@ def _run_dcgm_check_in_daemonset_pod(
         "Start with `overview`. For kernel-side evidence (XID errors, dmesg, "
         "driver/library version mismatch, PCIe state) use "
         "run_gpu_node_host_diagnostics instead.\n\n"
-        "Example: run_gpu_node_diagnostics(node=\"gpu-node-1\", check=\"overview\")"
+        "Example: run_gpu_node_diagnostics(node=\"gpu-node-1\", checks=[\"overview\",\"ecc\",\"throttling\"])"
     ),
 )
 def run_gpu_node_diagnostics(
     node: str,
-    check: str,
+    checks: List[str],
     dcgm_diag_level: int = 1,
 ) -> Dict[str, Any]:
     """
-    Run one pre-defined GPU diagnostic check on a node (no host access).
+    Run one or more pre-defined GPU diagnostic checks on a node (no host access).
 
     Args:
         node: Name of the node to diagnose (required)
-        check: Name of the check to run (see GPU_CHECKS/DCGM_CHECKS)
+        checks: Names of the checks to run (see GPU_CHECKS/DCGM_CHECKS)
         dcgm_diag_level: dcgmi diag -r level, only used by the dcgm_diag check
 
     Returns:
-        Dictionary with success status, stdout, stderr, and the node/check context
+        Dictionary with success status, stdout (one `===== <check> =====` section
+        per check), stderr, and the node/checks context
     """
     try:
         if not GPU_DIAG_ENABLED:
@@ -1529,18 +1548,30 @@ def run_gpu_node_diagnostics(
                 "(GPU_DIAG_ENABLED=false)."
             )
         _validate_identifier(node, "node")
-        if check in GPU_CHECKS:
-            spec = GPU_CHECKS[check]
-            argv = spec if isinstance(spec, list) else ["sh", "-c", spec]
-        elif check in DCGM_CHECKS:
-            if not DCGM_ENABLED:
-                raise ValueError(
-                    f"Check {check!r} is disabled: the operator has turned DCGM "
-                    f"checks off (DCGM_ENABLED=false). Available checks: "
-                    f"{', '.join(_gpu_check_names())}."
-                )
-            script = DCGM_CHECKS[check]
-            if check == "dcgm_diag":
+        checks = list(dict.fromkeys(checks))  # dedupe, keep order
+        if not checks:
+            raise ValueError(
+                f"No checks provided. Available checks: {', '.join(_gpu_check_names())}."
+            )
+        unknown = [c for c in checks if c not in GPU_CHECKS and c not in DCGM_CHECKS]
+        if unknown:
+            raise ValueError(
+                f"Unknown checks {unknown!r}. Available checks: "
+                f"{', '.join(_gpu_check_names())}. For kernel/driver/PCIe checks "
+                f"use run_gpu_node_host_diagnostics."
+            )
+        gpu_names = [c for c in checks if c in GPU_CHECKS]
+        dcgm_names = [c for c in checks if c in DCGM_CHECKS]
+        if dcgm_names and not DCGM_ENABLED:
+            raise ValueError(
+                f"Checks {dcgm_names!r} are disabled: the operator has turned DCGM "
+                f"checks off (DCGM_ENABLED=false). Available checks: "
+                f"{', '.join(_gpu_check_names())}."
+            )
+        dcgm_commands: Dict[str, str] = {}
+        for name in dcgm_names:
+            command = DCGM_CHECKS[name]
+            if name == "dcgm_diag":
                 if not 1 <= dcgm_diag_level <= GPU_DIAG_DCGM_MAX_DIAG_LEVEL:
                     raise ValueError(
                         f"dcgm_diag_level must be between 1 and "
@@ -1548,35 +1579,53 @@ def run_gpu_node_diagnostics(
                         f"GPU_DIAG_DCGM_MAX_DIAG_LEVEL; higher levels run longer and "
                         f"level 3 stress-tests the GPU). Got: {dcgm_diag_level}."
                     )
-                script = f"{script} {dcgm_diag_level}"
-        else:
-            raise ValueError(
-                f"Unknown check {check!r}. Available checks: "
-                f"{', '.join(_gpu_check_names())}. For kernel/driver/PCIe checks "
-                f"use run_gpu_node_host_diagnostics."
-            )
+                command = f"{command} {dcgm_diag_level}"
+            dcgm_commands[name] = command
     except ValueError as e:
         logger.warning(f"run_gpu_node_diagnostics refused: {e}")
         return {"success": False, "error": str(e)}
 
-    if check in DCGM_CHECKS:
-        # dcgmi runs in the DCGM DaemonSet pod already on the node — no image
-        # pull, no new pod, and its nv-hostengine is already live.
-        return _run_dcgm_check_in_daemonset_pod(node, check, script)
-    return _run_node_diagnostic_pod(
-        node=node, check=check, image=GPU_DIAG_IMAGE, argv=argv, host_access=False
-    )
+    results: List[Dict[str, Any]] = []
+    if gpu_names:
+        # All nvidia-smi checks share ONE throwaway pod.
+        script = _build_multi_check_script(gpu_names, GPU_CHECKS)
+        results.append(
+            _run_node_diagnostic_pod(
+                node=node,
+                checks=gpu_names,
+                image=GPU_DIAG_IMAGE,
+                argv=["sh", "-c", script],
+                host_access=False,
+            )
+        )
+    if dcgm_names:
+        # All dcgmi checks share ONE exec into the DCGM DaemonSet pod already
+        # on the node — no image pull, and its nv-hostengine is already live.
+        script = _build_multi_check_script(dcgm_names, dcgm_commands)
+        results.append(_run_dcgm_check_in_daemonset_pod(node, dcgm_names, script))
+
+    if len(results) == 1:
+        return results[0]
+    return {
+        "success": all(r.get("success") for r in results),
+        "node": node,
+        "checks": checks,
+        "nvidia_smi": results[0],
+        "dcgm": results[1],
+    }
 
 
 @mcp.tool(
     name="run_gpu_node_host_diagnostics",
     description=(
-        "AUTO-APPROVED (runs immediately, no human needed). Run one named GPU/driver "
-        "diagnostic that needs HOST-LEVEL access on a specific node (a short-lived "
-        "privileged pod with the host filesystem mounted read-only; auto-deleted). "
-        "Use run_gpu_node_diagnostics for GPU-level state (temperatures, ECC, "
-        "processes); reach for this one for kernel/driver/PCIe evidence.\n\n"
-        "Checks (pass the name as `check`):\n"
+        "AUTO-APPROVED (runs immediately, no human needed). Run one or more named "
+        "GPU/driver diagnostics that need HOST-LEVEL access on a specific node (a "
+        "short-lived privileged pod with the host filesystem mounted read-only; "
+        "auto-deleted). All requested checks run in a single pod — prefer one call "
+        "with several checks over several calls. Use run_gpu_node_diagnostics for "
+        "GPU-level state (temperatures, ECC, processes); reach for this one for "
+        "kernel/driver/PCIe evidence.\n\n"
+        "Checks (pass a list of names as `checks`):\n"
         "- kernel_gpu_errors: dmesg XID/NVRM errors ('GPU has fallen off the bus', "
         "driver load failures)\n"
         "- kernel_log_journal: last 2h of NVIDIA kernel-journal entries\n"
@@ -1589,31 +1638,32 @@ def run_gpu_node_diagnostics(
         "- gpu_device_holders: host processes holding /dev/nvidia* open "
         "(zombie processes keeping GPU memory allocated)\n"
         "- process_info: inspect one host process — requires pid\n\n"
-        "Example: run_gpu_node_host_diagnostics(node=\"gpu-node-1\", check=\"kernel_gpu_errors\")"
+        "Example: run_gpu_node_host_diagnostics(node=\"gpu-node-1\", checks=[\"kernel_gpu_errors\",\"driver_info\"])"
     ),
 )
 def run_gpu_node_host_diagnostics(
     node: str,
-    check: str,
+    checks: List[str],
     pid: Optional[int] = None,
     pci_bus_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Run one pre-defined host-level GPU diagnostic check on a node.
+    Run one or more pre-defined host-level GPU diagnostic checks on a node.
 
-    Read-only and auto-approved: the caller selects a check by name and every
+    Read-only and auto-approved: the caller selects checks by name and every
     command is server-owned, so the exposure is bounded to the fixed catalog.
     GPU_DIAG_ALLOW_HOST_ACCESS=false removes the tool for operators who don't
     want host-level pods launched without a human in the loop.
 
     Args:
         node: Name of the node to diagnose (required)
-        check: Name of the check to run (see HOST_CHECKS)
+        checks: Names of the checks to run (see HOST_CHECKS)
         pid: Host process id, required by the process_info check
         pci_bus_id: PCI bus id (e.g. "01:00.0"), required by the pci_link check
 
     Returns:
-        Dictionary with success status, stdout, stderr, and the node/check context
+        Dictionary with success status, stdout (one `===== <check> =====` section
+        per check), stderr, and the node/checks context
     """
     try:
         if not GPU_DIAG_ENABLED:
@@ -1629,38 +1679,49 @@ def run_gpu_node_host_diagnostics(
                 "still available."
             )
         _validate_identifier(node, "node")
-        if check not in HOST_CHECKS:
+        checks = list(dict.fromkeys(checks))  # dedupe, keep order
+        if not checks:
             raise ValueError(
-                f"Unknown check {check!r}. Available checks: "
+                f"No checks provided. Available checks: {', '.join(sorted(HOST_CHECKS))}."
+            )
+        unknown = [c for c in checks if c not in HOST_CHECKS]
+        if unknown:
+            raise ValueError(
+                f"Unknown checks {unknown!r}. Available checks: "
                 f"{', '.join(sorted(HOST_CHECKS))}."
             )
-        script = HOST_CHECKS[check]
-        required = HOST_CHECK_REQUIRED_PARAM.get(check)
-        if required == "pid":
-            # Validated strictly because it is substituted into the (server-
-            # owned) shell command below.
-            if pid is None or not 0 < int(pid) < 2**22:
-                raise ValueError(
-                    "The process_info check requires `pid`: a positive host "
-                    "process id (see gpu_device_holders or compute_processes)."
-                )
-            script = script.replace("{pid}", str(int(pid)))
-        elif required == "pci_bus_id":
-            # Same: only hex digits, ':' and '.' may reach the shell string.
-            if not pci_bus_id or not _PCI_BUS_ID_RE.match(pci_bus_id):
-                raise ValueError(
-                    "The pci_link check requires `pci_bus_id` in lspci form "
-                    "(e.g. \"01:00.0\" or \"0000:01:00.0\"); run the `pci` check "
-                    "first to find it."
-                )
-            script = script.replace("{bus_id}", pci_bus_id)
+        commands: Dict[str, str] = {}
+        for name in checks:
+            script = HOST_CHECKS[name]
+            required = HOST_CHECK_REQUIRED_PARAM.get(name)
+            if required == "pid":
+                # Validated strictly because it is substituted into the (server-
+                # owned) shell command below.
+                if pid is None or not 0 < int(pid) < 2**22:
+                    raise ValueError(
+                        "The process_info check requires `pid`: a positive host "
+                        "process id (see gpu_device_holders or compute_processes)."
+                    )
+                script = script.replace("{pid}", str(int(pid)))
+            elif required == "pci_bus_id":
+                # Same: only hex digits, ':' and '.' may reach the shell string.
+                if not pci_bus_id or not _PCI_BUS_ID_RE.match(pci_bus_id):
+                    raise ValueError(
+                        "The pci_link check requires `pci_bus_id` in lspci form "
+                        "(e.g. \"01:00.0\" or \"0000:01:00.0\"); run the `pci` check "
+                        "first to find it."
+                    )
+                script = script.replace("{bus_id}", pci_bus_id)
+            commands[name] = script
     except ValueError as e:
         logger.warning(f"run_gpu_node_host_diagnostics refused: {e}")
         return {"success": False, "error": str(e)}
 
+    # All requested checks share ONE privileged debug pod.
+    script = _build_multi_check_script(checks, commands)
     return _run_node_diagnostic_pod(
         node=node,
-        check=check,
+        checks=checks,
         image=GPU_DIAG_HOST_IMAGE,
         argv=["sh", "-c", script],
         host_access=True,

@@ -879,6 +879,13 @@ def _captured_overrides(run_args):
     return json.loads(run_args[idx + 1])
 
 
+def _in_pod_script(run_args):
+    """Return the `sh -c` script from a captured kubectl run argv."""
+    in_pod = run_args[run_args.index("--") + 1 :]
+    assert in_pod[:2] == ["sh", "-c"], in_pod
+    return in_pod[2]
+
+
 def _run_gpu_check(**kwargs):
     """Call run_gpu_node_diagnostics with kubectl and the cleanup delete mocked;
     returns (result, captured kubectl args or None)."""
@@ -896,29 +903,37 @@ def _run_host_check(**kwargs):
 
 
 def test_gpu_diagnostics_unknown_check_refused():
-    result, args = _run_gpu_check(node="gpu-node-1", check="nonsense")
+    result, args = _run_gpu_check(node="gpu-node-1", checks=["overview", "nonsense"])
     assert args is None
     assert result["success"] is False
-    assert "Unknown check" in result["error"]
+    assert "Unknown checks" in result["error"]
+    assert "nonsense" in result["error"]
     assert "overview" in result["error"]  # the refusal lists valid checks
 
 
+def test_gpu_diagnostics_empty_checks_refused():
+    result, args = _run_gpu_check(node="gpu-node-1", checks=[])
+    assert args is None
+    assert "No checks provided" in result["error"]
+
+
 def test_gpu_diagnostics_rejects_node_flag_injection():
-    result, args = _run_gpu_check(node="--kubeconfig=/tmp/evil", check="overview")
+    result, args = _run_gpu_check(node="--kubeconfig=/tmp/evil", checks=["overview"])
     assert args is None
     assert result["success"] is False
     assert "flag injection" in result["error"]
 
 
 def test_gpu_diagnostics_overview_builds_hardened_node_pinned_pod():
-    result, args = _run_gpu_check(node="gpu-node-1", check="overview")
+    result, args = _run_gpu_check(node="gpu-node-1", checks=["overview"])
     assert result["success"] is True
     assert result["node"] == "gpu-node-1"
-    assert result["check"] == "overview"
+    assert result["checks"] == ["overview"]
     assert args[0] == "run"
     assert f"--image={k.GPU_DIAG_IMAGE}" in args
-    # in-pod argv is exactly the catalog command
-    assert args[args.index("--") + 1 :] == ["nvidia-smi"]
+    script = _in_pod_script(args)
+    assert "===== overview =====" in script
+    assert "nvidia-smi" in script
 
     overrides = _captured_overrides(args)
     spec = overrides["spec"]
@@ -930,7 +945,7 @@ def test_gpu_diagnostics_overview_builds_hardened_node_pinned_pod():
     assert spec["runtimeClassName"] == k.GPU_DIAG_RUNTIME_CLASS
     assert spec["tolerations"] == [{"operator": "Exists"}]
     assert overrides["metadata"]["labels"]["robusta.dev/diagnostic-pod"] == "true"
-    # no host access on the auto-approved tier
+    # no host access on this tool
     assert "volumes" not in spec
     assert container["securityContext"] == {"allowPrivilegeEscalation": False}
     # driver injection without allocating a GPU
@@ -939,19 +954,33 @@ def test_gpu_diagnostics_overview_builds_hardened_node_pinned_pod():
     assert "nvidia.com/gpu" not in json.dumps(overrides)
 
 
-def test_gpu_diagnostics_shell_checks_run_under_sh():
-    result, args = _run_gpu_check(node="n1", check="utilization_samples")
+def test_gpu_diagnostics_multiple_checks_share_one_pod():
+    result, args = _run_gpu_check(
+        node="n1", checks=["overview", "ecc", "utilization_samples"]
+    )
     assert result["success"] is True
-    in_pod = args[args.index("--") + 1 :]
-    assert in_pod[:2] == ["sh", "-c"]
-    assert "nvidia-smi" in in_pod[2]
+    assert result["checks"] == ["overview", "ecc", "utilization_samples"]
+    assert args[0] == "run"
+    script = _in_pod_script(args)
+    # one pod, one script, a header per check, order preserved
+    assert script.index("===== overview =====") < script.index("===== ecc =====")
+    assert script.index("===== ecc =====") < script.index("===== utilization_samples =====")
+    assert "nvidia-smi -q -d ECC" in script
+    # a failing check must not abort the rest, but must fail the run overall
+    assert "exit $failed" in script
+
+
+def test_gpu_diagnostics_deduplicates_checks():
+    result, args = _run_gpu_check(node="n1", checks=["overview", "overview"])
+    assert result["checks"] == ["overview"]
+    assert _in_pod_script(args).count("===== overview =====") == 1
 
 
 def test_gpu_diagnostics_dcgm_off_by_default():
     # DCGM is opt-in: without DCGM_ENABLED=true the dcgm_* checks are refused
     # (nothing looked up, nothing launched) and the refusal names the toggle.
     assert k.DCGM_ENABLED is False
-    result, args = _run_gpu_check(node="n1", check="dcgm_discovery")
+    result, args = _run_gpu_check(node="n1", checks=["dcgm_discovery"])
     assert args is None
     assert result["success"] is False
     assert "DCGM_ENABLED" in result["error"]
@@ -964,7 +993,9 @@ def test_gpu_diagnostics_dcgm_execs_in_existing_daemonset_pod():
     exec_result = {"success": True, "stdout": "diag output"}
     with patch.object(k, "DCGM_ENABLED", True), \
          patch.object(k, "_run_kubectl", side_effect=[lookup, exec_result]) as m:
-        result = k.run_gpu_node_diagnostics(node="n1", check="dcgm_diag", dcgm_diag_level=1)
+        result = k.run_gpu_node_diagnostics(
+            node="n1", checks=["dcgm_discovery", "dcgm_diag"], dcgm_diag_level=1
+        )
     assert result["success"] is True
     assert result["dcgm_pod"] == "gpu-operator/nvidia-dcgm-x7k2q"
 
@@ -974,12 +1005,36 @@ def test_gpu_diagnostics_dcgm_execs_in_existing_daemonset_pod():
     assert k.GPU_DIAG_DCGM_POD_SELECTOR in lookup_args
 
     exec_args = m.call_args_list[1].args[0]
-    assert exec_args == [
-        "exec", "nvidia-dcgm-x7k2q", "-n", "gpu-operator",
-        "--", "sh", "-c", "dcgmi diag -r 1",
-    ]
+    assert exec_args[:6] == ["exec", "nvidia-dcgm-x7k2q", "-n", "gpu-operator", "--", "sh"]
+    script = exec_args[7]
+    # both dcgm checks batched into the single exec
+    assert "===== dcgm_discovery =====" in script
+    assert "dcgmi discovery -l" in script
+    assert "dcgmi diag -r 1" in script
     # kubectl run must never have been invoked
     assert all(call.args[0][0] != "run" for call in m.call_args_list)
+
+
+def test_gpu_diagnostics_mixed_checks_run_pod_and_dcgm_exec():
+    # nvidia-smi checks get one debug pod; dcgm checks get one exec — one call.
+    lookup = {"success": True, "stdout": "gpu-operator/nvidia-dcgm-abc12\n"}
+    # distinct dicts: the server annotates each result in place
+    with patch.object(k, "DCGM_ENABLED", True), \
+         patch.object(
+             k, "_run_kubectl",
+             side_effect=[{"success": True, "stdout": "x"}, lookup,
+                          {"success": True, "stdout": "y"}],
+         ) as m, \
+         patch.object(k.subprocess, "run"):
+        result = k.run_gpu_node_diagnostics(
+            node="n1", checks=["overview", "dcgm_discovery"]
+        )
+    assert result["success"] is True
+    assert result["checks"] == ["overview", "dcgm_discovery"]
+    assert result["nvidia_smi"]["checks"] == ["overview"]
+    assert result["dcgm"]["checks"] == ["dcgm_discovery"]
+    verbs = [call.args[0][0] for call in m.call_args_list]
+    assert verbs == ["run", "get", "exec"]
 
 
 def test_gpu_diagnostics_dcgm_errors_when_no_daemonset_pod():
@@ -988,7 +1043,7 @@ def test_gpu_diagnostics_dcgm_errors_when_no_daemonset_pod():
     lookup = {"success": True, "stdout": ""}
     with patch.object(k, "DCGM_ENABLED", True), \
          patch.object(k, "_run_kubectl", side_effect=[lookup]) as m:
-        result = k.run_gpu_node_diagnostics(node="n1", check="dcgm_discovery")
+        result = k.run_gpu_node_diagnostics(node="n1", checks=["dcgm_discovery"])
     assert result["success"] is False
     assert k.GPU_DIAG_DCGM_POD_SELECTOR in result["error"]
     assert "nvidia-smi checks" in result["error"]  # tells the model what still works
@@ -998,7 +1053,7 @@ def test_gpu_diagnostics_dcgm_errors_when_no_daemonset_pod():
 def test_gpu_diagnostics_dcgm_diag_level_capped():
     with patch.object(k, "DCGM_ENABLED", True):
         result, args = _run_gpu_check(
-            node="n1", check="dcgm_diag",
+            node="n1", checks=["dcgm_diag"],
             dcgm_diag_level=k.GPU_DIAG_DCGM_MAX_DIAG_LEVEL + 1,
         )
     assert args is None
@@ -1008,8 +1063,8 @@ def test_gpu_diagnostics_dcgm_diag_level_capped():
 
 def test_gpu_diagnostics_refused_when_feature_disabled():
     with patch.object(k, "GPU_DIAG_ENABLED", False):
-        gpu_result, gpu_args = _run_gpu_check(node="n1", check="overview")
-        host_result, host_args = _run_host_check(node="n1", check="pci")
+        gpu_result, gpu_args = _run_gpu_check(node="n1", checks=["overview"])
+        host_result, host_args = _run_host_check(node="n1", checks=["pci"])
     assert gpu_args is None and host_args is None
     assert "GPU_DIAG_ENABLED" in gpu_result["error"]
     assert "GPU_DIAG_ENABLED" in host_result["error"]
@@ -1020,7 +1075,7 @@ def test_gpu_diagnostics_pod_deleted_even_on_timeout():
     with patch.object(
         k, "_run_kubectl", return_value={"success": False, "error": "timed out"}
     ), patch.object(k.subprocess, "run") as delete:
-        k.run_gpu_node_diagnostics(node="n1", check="overview")
+        k.run_gpu_node_diagnostics(node="n1", checks=["overview"])
     delete_args = delete.call_args.args[0]
     assert delete_args[:3] == ["kubectl", "delete", "pod"]
     assert "--ignore-not-found" in delete_args
@@ -1029,12 +1084,12 @@ def test_gpu_diagnostics_pod_deleted_even_on_timeout():
 # ── GPU host-level diagnostics ────────────────────────────────────────────────
 
 def test_host_diagnostics_builds_privileged_readonly_host_pod():
-    result, args = _run_host_check(node="gpu-node-1", check="kernel_gpu_errors")
+    result, args = _run_host_check(node="gpu-node-1", checks=["kernel_gpu_errors"])
     assert result["success"] is True
     assert f"--image={k.GPU_DIAG_HOST_IMAGE}" in args
-    in_pod = args[args.index("--") + 1 :]
-    assert in_pod[:2] == ["sh", "-c"]
-    assert "dmesg" in in_pod[2]
+    script = _in_pod_script(args)
+    assert "===== kernel_gpu_errors =====" in script
+    assert "dmesg" in script
 
     overrides = _captured_overrides(args)
     spec = overrides["spec"]
@@ -1052,48 +1107,60 @@ def test_host_diagnostics_builds_privileged_readonly_host_pod():
     assert overrides["metadata"]["labels"]["robusta.dev/diagnostic-pod"] == "true"
 
 
+def test_host_diagnostics_multiple_checks_share_one_pod():
+    result, args = _run_host_check(
+        node="n1", checks=["kernel_gpu_errors", "driver_info", "pci"]
+    )
+    assert result["success"] is True
+    assert result["checks"] == ["kernel_gpu_errors", "driver_info", "pci"]
+    script = _in_pod_script(args)
+    for name in ("kernel_gpu_errors", "driver_info", "pci"):
+        assert f"===== {name} =====" in script
+    assert "exit $failed" in script
+
+
 def test_host_diagnostics_refused_when_host_access_disabled():
     with patch.object(k, "GPU_DIAG_ALLOW_HOST_ACCESS", False):
-        result, args = _run_host_check(node="n1", check="kernel_gpu_errors")
+        result, args = _run_host_check(node="n1", checks=["kernel_gpu_errors"])
     assert args is None
     assert result["success"] is False
     assert "GPU_DIAG_ALLOW_HOST_ACCESS" in result["error"]
 
 
 def test_host_diagnostics_unknown_check_refused():
-    result, args = _run_host_check(node="n1", check="rm_dash_rf")
+    result, args = _run_host_check(node="n1", checks=["rm_dash_rf"])
     assert args is None
-    assert "Unknown check" in result["error"]
+    assert "Unknown checks" in result["error"]
 
 
 def test_host_diagnostics_process_info_requires_valid_pid():
     for bad_pid in (None, 0, -5, 2**22):
-        result, args = _run_host_check(node="n1", check="process_info", pid=bad_pid)
+        result, args = _run_host_check(node="n1", checks=["process_info"], pid=bad_pid)
         assert args is None, f"pid={bad_pid} should have been refused"
         assert result["success"] is False
 
-    result, args = _run_host_check(node="n1", check="process_info", pid=4321)
+    result, args = _run_host_check(node="n1", checks=["process_info"], pid=4321)
     assert result["success"] is True
-    script = args[args.index("--") + 3]  # ["sh", "-c", script]
+    script = _in_pod_script(args)
     assert "/proc/4321/" in script
     assert "{pid}" not in script
 
 
 def test_host_diagnostics_pci_link_validates_bus_id():
     for bad in (None, "", "01:00.0; rm -rf /", "$(reboot)", "aa" * 20):
-        result, args = _run_host_check(node="n1", check="pci_link", pci_bus_id=bad)
+        result, args = _run_host_check(node="n1", checks=["pci_link"], pci_bus_id=bad)
         assert args is None, f"pci_bus_id={bad!r} should have been refused"
         assert result["success"] is False
 
-    result, args = _run_host_check(node="n1", check="pci_link", pci_bus_id="0000:01:00.0")
+    result, args = _run_host_check(node="n1", checks=["pci_link"], pci_bus_id="0000:01:00.0")
     assert result["success"] is True
-    script = args[args.index("--") + 3]
+    script = _in_pod_script(args)
     assert "-s 0000:01:00.0" in script
     assert "{bus_id}" not in script
 
 
 def test_host_diagnostics_rejects_node_flag_injection():
-    result, args = _run_host_check(node="-oyaml", check="pci")
+    result, args = _run_host_check(node="-oyaml", checks=["pci"])
     assert args is None
     assert "flag injection" in result["error"]
 
@@ -1106,5 +1173,7 @@ def test_config_exposes_gpu_diagnostics_policy():
     assert "overview" in gpu["checks"]
     assert "dcgm_diag" in gpu["dcgm_checks"]
     assert "kernel_gpu_errors" in gpu["host_checks"]
+    assert gpu["dcgm_enabled"] is k.DCGM_ENABLED
+    assert gpu["dcgm_pod_selector"] == k.GPU_DIAG_DCGM_POD_SELECTOR
     assert gpu["allow_host_access"] is k.GPU_DIAG_ALLOW_HOST_ACCESS
     assert gpu["dcgm_max_diag_level"] == k.GPU_DIAG_DCGM_MAX_DIAG_LEVEL

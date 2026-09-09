@@ -34,8 +34,8 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 | `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied. |
 | `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist — only `command[0]` is checked, exactly. |
 | `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped, not host-networked) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag) **and a target policy** — see [Diagnostic-pod target policy](#diagnostic-pod-target-policy). |
-| `run_gpu_node_diagnostics` | Run one **named** GPU check (`overview`, `details`, `throttling`, `utilization_samples`, `ecc`, `page_retirement`, `row_remapper`, `compute_processes`, `dcgm_*`) on a specific node, via a short-lived pod pinned to that node. The NVIDIA container runtime injects the host driver's `nvidia-smi` (`NVIDIA_VISIBLE_DEVICES=all`) — no `nvidia.com/gpu` is allocated, so it works on fully-utilized nodes. No host mounts, no `hostPID`. | Check-name catalog — every command string is server-owned; the caller picks only the node, the check name, and a bounds-checked `dcgm_diag_level`. See [GPU node diagnostics](#gpu-node-diagnostics). |
-| `run_gpu_node_host_diagnostics` | Run one **named** kernel/driver/PCIe GPU check (`kernel_gpu_errors`, `kernel_log_journal`, `driver_info`, `pci`, `pci_link`, `fabric_manager`, `gpu_device_holders`, `process_info`) via a privileged, `hostPID` pod with the host root mounted **read-only** at `/host`. Read-only host access — auto-approvable because the caller picks only a check name plus strictly validated `pid`/`pci_bus_id` scalars; every command is server-owned. | Check-name catalog + scalar validators; `GPU_DIAG_ALLOW_HOST_ACCESS=false` removes the tool entirely. See [GPU node diagnostics](#gpu-node-diagnostics). |
+| `run_gpu_node_diagnostics` | Run one or more **named** GPU checks (single pod for all of them) (`overview`, `details`, `throttling`, `utilization_samples`, `ecc`, `page_retirement`, `row_remapper`, `compute_processes`, `dcgm_*`) on a specific node, via a short-lived pod pinned to that node. The NVIDIA container runtime injects the host driver's `nvidia-smi` (`NVIDIA_VISIBLE_DEVICES=all`) — no `nvidia.com/gpu` is allocated, so it works on fully-utilized nodes. No host mounts, no `hostPID`. | Check-name catalog — every command string is server-owned; the caller picks only the node, the check names, and a bounds-checked `dcgm_diag_level`. See [GPU node diagnostics](#gpu-node-diagnostics). |
+| `run_gpu_node_host_diagnostics` | Run one or more **named** kernel/driver/PCIe GPU checks (single pod for all of them) (`kernel_gpu_errors`, `kernel_log_journal`, `driver_info`, `pci`, `pci_link`, `fabric_manager`, `gpu_device_holders`, `process_info`) via a privileged, `hostPID` pod with the host root mounted **read-only** at `/host`. Read-only host access — auto-approvable because the caller picks only a check name plus strictly validated `pid`/`pci_bus_id` scalars; every command is server-owned. | Check-name catalog + scalar validators; `GPU_DIAG_ALLOW_HOST_ACCESS=false` removes the tool entirely. See [GPU node diagnostics](#gpu-node-diagnostics). |
 | `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
 
 `run_preapproved_kubectl_exec_command` deliberately excludes `cat` (use
@@ -109,10 +109,12 @@ Both GPU tools launch a short-lived pod **pinned to the target node** (via
 `spec.nodeName`, so a cordoned node can still be diagnosed; a blanket
 toleration keeps GPU-node taints from evicting it), labeled
 `robusta.dev/diagnostic-pod: "true"` like the other diagnostic pods, with no
-ServiceAccount token, and auto-deleted afterwards. The caller selects a check
-**by name** — every command string is a server-owned constant, and the only
-caller-supplied values that reach a command are a numeric `pid`, a
-`[0-9a-fA-F:.]`-validated PCI bus id, and a bounds-checked `dcgmi diag` level.
+ServiceAccount token, and auto-deleted afterwards. The caller selects checks
+**by name** (several per call — they all run in the same pod, one
+`===== <check> =====` section per check in the output) — every command string
+is a server-owned constant, and the only caller-supplied values that reach a
+command are a numeric `pid`, a `[0-9a-fA-F:.]`-validated PCI bus id, and a
+bounds-checked `dcgmi diag` level.
 
 - **`run_gpu_node_diagnostics`** (auto-approved) covers the nvidia-smi surface:
   driver/temperature/power overview, throttle reasons, ECC counts, retired
