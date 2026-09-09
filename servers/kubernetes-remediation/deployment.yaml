@@ -68,17 +68,18 @@ spec:
           value: "/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/"
 
         # ---- GPU node diagnostics ----
-        # The GPU tools work with no configuration; only DCGM is opt-in.
-        # dcgm_* checks exec dcgmi in the node's EXISTING DCGM DaemonSet pod
-        # (e.g. the GPU Operator's nvidia-dcgm) — no image is ever pulled.
-        # Enable only where DCGM is deployed.
+        # run_gpu_node_diagnostics works with no configuration: it runs the
+        # NODE'S OWN binaries (nvidia-smi, dmesg, lspci, ...) through a
+        # read-only host-filesystem mount — no custom image. Only DCGM is
+        # opt-in: dcgm_* checks exec dcgmi in the node's EXISTING DCGM
+        # DaemonSet pod (e.g. the GPU Operator's nvidia-dcgm) — enable only
+        # where DCGM is deployed.
         - name: DCGM_ENABLED
           value: "false"
         # Optional knobs (defaults shown in the README): GPU_DIAG_ENABLED,
-        # GPU_DIAG_IMAGE, GPU_DIAG_DCGM_POD_SELECTOR,
-        # GPU_DIAG_DCGM_MAX_DIAG_LEVEL, GPU_DIAG_RUNTIME_CLASS,
-        # GPU_DIAG_ALLOW_HOST_ACCESS, GPU_DIAG_HOST_IMAGE, GPU_DIAG_NAMESPACE,
-        # GPU_DIAG_TIMEOUT
+        # GPU_DIAG_IMAGE (shell-only pod image, busybox),
+        # GPU_DIAG_DCGM_POD_SELECTOR, GPU_DIAG_DCGM_MAX_DIAG_LEVEL,
+        # GPU_DIAG_NAMESPACE, GPU_DIAG_TIMEOUT
 
         # Enable the approval-gated fallback (set to "false" for a fully locked-down mode)
         - name: KUBECTL_ALLOW_ARBITRARY_COMMANDS
