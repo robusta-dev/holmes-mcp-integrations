@@ -1012,68 +1012,22 @@ def test_gpu_diagnostics_dcgm_off_by_default():
     assert "DCGM_ENABLED" in result["error"]
 
 
-def test_gpu_diagnostics_dcgm_execs_in_existing_daemonset_pod():
-    # dcgm checks use the DCGM already on the node: look up the DaemonSet pod
-    # pinned to that node, then exec dcgmi there. No image, no new pod.
-    lookup = {"success": True, "stdout": "gpu-operator/nvidia-dcgm-x7k2q\n"}
-    exec_result = {"success": True, "stdout": "diag output"}
-    with patch.object(k, "DCGM_ENABLED", True), \
-         patch.object(k, "_run_kubectl", side_effect=[lookup, exec_result]) as m:
-        result = k.run_gpu_node_diagnostics(
-            node="n1", checks=["dcgm_discovery", "dcgm_diag"], dcgm_diag_level=1
+def test_gpu_diagnostics_dcgm_runs_on_host_in_the_same_pod():
+    # DCGM enabled => dcgmi is assumed installed on the host and runs via
+    # chroot /host in the SAME single pod as every other check.
+    with patch.object(k, "DCGM_ENABLED", True):
+        result, args = _run_gpu_check(
+            node="n1",
+            checks=["overview", "dcgm_discovery", "dcgm_diag"],
+            dcgm_diag_level=1,
         )
     assert result["success"] is True
-    assert result["dcgm_pod"] == "gpu-operator/nvidia-dcgm-x7k2q"
-
-    lookup_args = m.call_args_list[0].args[0]
-    assert lookup_args[:2] == ["get", "pods"]
-    assert "spec.nodeName=n1,status.phase=Running" in " ".join(lookup_args)
-    assert k.GPU_DIAG_DCGM_POD_SELECTOR in lookup_args
-
-    exec_args = m.call_args_list[1].args[0]
-    assert exec_args[:6] == ["exec", "nvidia-dcgm-x7k2q", "-n", "gpu-operator", "--", "sh"]
-    script = exec_args[7]
-    # both dcgm checks batched into the single exec
+    assert result["checks"] == ["overview", "dcgm_discovery", "dcgm_diag"]
+    assert args[0] == "run"  # exactly one pod, nothing else
+    script = _in_pod_script(args)
     assert "===== dcgm_discovery =====" in script
-    assert "dcgmi discovery -l" in script
-    assert "dcgmi diag -r 1" in script
-    # kubectl run must never have been invoked
-    assert all(call.args[0][0] != "run" for call in m.call_args_list)
-
-
-def test_gpu_diagnostics_mixed_checks_run_pod_and_dcgm_exec():
-    # host-filesystem checks get one debug pod; dcgm checks get one exec.
-    lookup = {"success": True, "stdout": "gpu-operator/nvidia-dcgm-abc12\n"}
-    # distinct dicts: the server annotates each result in place
-    with patch.object(k, "DCGM_ENABLED", True), \
-         patch.object(
-             k, "_run_kubectl",
-             side_effect=[{"success": True, "stdout": "x"}, lookup,
-                          {"success": True, "stdout": "y"}],
-         ) as m, \
-         patch.object(k.subprocess, "run"):
-        result = k.run_gpu_node_diagnostics(
-            node="n1", checks=["overview", "dcgm_discovery"]
-        )
-    assert result["success"] is True
-    assert result["checks"] == ["overview", "dcgm_discovery"]
-    assert result["node_checks"]["checks"] == ["overview"]
-    assert result["dcgm"]["checks"] == ["dcgm_discovery"]
-    verbs = [call.args[0][0] for call in m.call_args_list]
-    assert verbs == ["run", "get", "exec"]
-
-
-def test_gpu_diagnostics_dcgm_errors_when_no_daemonset_pod():
-    # No fallback image by design: without a DCGM pod on the node the check
-    # returns a structured error naming the selector, and nothing is launched.
-    lookup = {"success": True, "stdout": ""}
-    with patch.object(k, "DCGM_ENABLED", True), \
-         patch.object(k, "_run_kubectl", side_effect=[lookup]) as m:
-        result = k.run_gpu_node_diagnostics(node="n1", checks=["dcgm_discovery"])
-    assert result["success"] is False
-    assert k.GPU_DIAG_DCGM_POD_SELECTOR in result["error"]
-    assert "nvidia-smi checks" in result["error"]  # tells the model what still works
-    assert len(m.call_args_list) == 1  # only the lookup ran
+    assert "chroot /host dcgmi discovery -l" in script
+    assert "chroot /host dcgmi diag -r 1" in script
 
 
 def test_gpu_diagnostics_dcgm_diag_level_capped():
@@ -1115,5 +1069,4 @@ def test_config_exposes_gpu_diagnostics_policy():
     assert "kernel_gpu_errors" in gpu["checks"]
     assert "dcgm_diag" in gpu["dcgm_checks"]
     assert gpu["dcgm_enabled"] is k.DCGM_ENABLED
-    assert gpu["dcgm_pod_selector"] == k.GPU_DIAG_DCGM_POD_SELECTOR
     assert gpu["dcgm_max_diag_level"] == k.GPU_DIAG_DCGM_MAX_DIAG_LEVEL

@@ -88,8 +88,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `MCP_AUTH_TOKEN` | *(unset)* | bearer token required on every HTTP-transport request; unset = unauthenticated (a startup warning is logged) |
 | `GPU_DIAG_ENABLED` | `true` | master switch for both GPU node diagnostics tools |
 | `GPU_DIAG_IMAGE` | `busybox:1.37.0` | pod image for the GPU checks — only supplies a shell; every diagnostic binary comes from the node via the read-only `/host` mount |
-| `DCGM_ENABLED` | `false` | **opt-in**: enable the `dcgm_*` checks — `dcgmi` runs in the node's EXISTING DCGM DaemonSet pod (e.g. the GPU Operator's `nvidia-dcgm`); no image is pulled, and there is no fallback when the node has no DCGM pod |
-| `GPU_DIAG_DCGM_POD_SELECTOR` | `app=nvidia-dcgm` | label selector locating the node's DCGM pod |
+| `DCGM_ENABLED` | `false` | **opt-in**: enable the `dcgm_*` checks — when enabled, `dcgmi` (with its `nv-hostengine` service) is assumed installed on the host and runs via `chroot /host` like every other check |
 | `GPU_DIAG_DCGM_MAX_DIAG_LEVEL` | `1` | highest `dcgmi diag -r <level>` allowed (levels 2–3 run long; 3 stress-tests the GPU) |
 | `GPU_DIAG_NAMESPACE` | `default` | namespace the GPU diagnostic pods run in (the Helm chart sets the release namespace) |
 | `GPU_DIAG_TIMEOUT` | `300` | per-check timeout (s) — covers image pull and `dcgmi diag` runtime |
@@ -125,11 +124,10 @@ and link state, fabric-manager status, `/dev/nvidia*` holders, per-process
 inspection).
 
 The optional `dcgm_*` checks (`DCGM_ENABLED=true`, off by default) follow the
-same use-what's-on-the-node principle: they `kubectl exec` `dcgmi` in the
-node's **existing** DCGM DaemonSet pod (located via
-`GPU_DIAG_DCGM_POD_SELECTOR`, GPU Operator's `app=nvidia-dcgm` by default),
-whose host engine is already live — no image pull, no new pod, and a clear
-error when the node has no DCGM pod (there is deliberately no fallback image).
+same principle: `dcgmi` runs from the host via `chroot /host` like everything
+else. Enabling DCGM asserts that the host has `dcgmi` installed (with its
+`nv-hostengine` service running); if it doesn't, dcgmi's own error is returned
+verbatim.
 
 The tool stays auto-approvable because the check catalog bounds what a caller
 (or prompt-injected content steering the caller) can do: trigger the fixed

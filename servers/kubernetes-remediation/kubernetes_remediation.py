@@ -253,8 +253,8 @@ DIAGNOSTIC_HTTP_CLIENTS = {"curl", "wget"}
 # lspci, modinfo, journalctl) via `chroot /host`. No special image: the pod
 # image only supplies a shell (busybox). nvidia-smi is resolved from the host
 # PATH, with a fallback to /run/nvidia/driver for GPU Operator clusters that
-# run the containerized driver. The dcgm_* checks are the exception: they exec
-# `dcgmi` in the DCGM DaemonSet pod already on the node.
+# run the containerized driver. The dcgm_* checks run `dcgmi` from the host
+# too, and are opt-in (DCGM_ENABLED) since not every node has DCGM installed.
 #
 # What makes this auto-approvable under the "approval is a property of the
 # tool" design: the caller picks only the node and check NAMES (plus a couple
@@ -269,17 +269,11 @@ GPU_DIAG_ENABLED = _env_bool("GPU_DIAG_ENABLED", True)
 # Pod image: only needs a shell — every diagnostic binary comes from the node.
 GPU_DIAG_IMAGE = os.getenv("GPU_DIAG_IMAGE", "busybox:1.37.0")
 
-# DCGM checks (dcgmi discovery/health/diag) are opt-in and use the DCGM
-# ALREADY ON THE NODE: on GPU Operator clusters DCGM runs as a DaemonSet
-# (nv-hostengine in the `nvidia-dcgm` pods), so the server execs `dcgmi` in
-# the DaemonSet pod on the target node — no image pull, no new pod. When no
-# such pod exists the check returns a structured error; there is deliberately
-# no fallback image. Off by default: enable only where DCGM is deployed.
+# DCGM checks (dcgmi discovery/health/diag) are opt-in. When enabled, dcgmi is
+# assumed to be installed ON THE HOST (with its nv-hostengine service running)
+# and runs via `chroot /host` like every other check; if it isn't there, the
+# check returns dcgmi's own error verbatim. Off by default.
 DCGM_ENABLED = _env_bool("DCGM_ENABLED", False)
-# Label selector locating the node's DCGM pod (GPU Operator default shown).
-GPU_DIAG_DCGM_POD_SELECTOR = os.getenv(
-    "GPU_DIAG_DCGM_POD_SELECTOR", "app=nvidia-dcgm"
-).strip()
 # Highest `dcgmi diag -r <level>` the auto-approved tool may run. Levels 2 and 3
 # take minutes and level 3 actively stresses the GPU, so operators opt in.
 GPU_DIAG_DCGM_MAX_DIAG_LEVEL = int(os.getenv("GPU_DIAG_DCGM_MAX_DIAG_LEVEL", "1"))
@@ -344,15 +338,19 @@ GPU_CHECKS: Dict[str, str] = {
     ),
 }
 
-# DCGM check commands, run via `kubectl exec` in the node's DCGM DaemonSet pod
-# against its already-live host engine.
+# DCGM check commands — the host's own dcgmi, like everything else. Opt-in via
+# DCGM_ENABLED; when enabled, dcgmi (and its nv-hostengine service) is assumed
+# to be installed on the host, and its own error is returned verbatim if not.
 DCGM_CHECKS: Dict[str, str] = {
     # does DCGM see the GPUs at all
-    "dcgm_discovery": "dcgmi discovery -l",
+    "dcgm_discovery": "chroot /host dcgmi discovery -l",
     # background health watches: set watches on group 0 (all GPUs), then check
-    "dcgm_health": "dcgmi health -g 0 -s a >/dev/null 2>&1; dcgmi health -g 0 -c",
+    "dcgm_health": (
+        "chroot /host dcgmi health -g 0 -s a >/dev/null 2>&1; "
+        "chroot /host dcgmi health -g 0 -c"
+    ),
     # active diagnostic; the -r level is appended after validation
-    "dcgm_diag": "dcgmi diag -r",
+    "dcgm_diag": "chroot /host dcgmi diag -r",
 }
 
 # Kernel/driver/PCIe checks. Same pod, same rules: host binaries run via
@@ -425,8 +423,8 @@ HOST_CHECK_REQUIRED_PARAM = {"pci_link": "pci_bus_id", "process_info": "pid"}
 
 _PCI_BUS_ID_RE = re.compile(r"^[0-9a-fA-F:.]{1,16}$")
 
-# The full catalog of checks that run in the node-pinned host pod (the dcgm_*
-# checks are separate: they exec into the node's DCGM DaemonSet pod).
+# The always-available catalog; the opt-in DCGM_CHECKS run in the same pod
+# when DCGM_ENABLED is set.
 NODE_CHECKS: Dict[str, str] = {**GPU_CHECKS, **HOST_CHECKS}
 
 
@@ -1391,11 +1389,11 @@ def _gpu_check_names() -> List[str]:
 
 def _build_multi_check_script(names: List[str], commands: Dict[str, str]) -> str:
     """
-    Concatenate the requested checks into one shell script so a single pod (or
-    a single exec) answers them all. Each check prints a `===== <name> =====`
-    header before its output, a failing check does not stop the ones after it,
-    and the script exits non-zero if any check failed. All inputs are
-    server-owned constants (plus the already-validated pid/bus-id/diag-level
+    Concatenate the requested checks into one shell script so a single pod
+    answers them all. Each check prints a `===== <name> =====` header before
+    its output, a failing check does not stop the ones after it, and the
+    script exits non-zero if any check failed. All inputs are server-owned
+    constants (plus the already-validated pid/bus-id/diag-level
     substitutions), so this is not an injection surface.
     """
     parts = ["failed=0"]
@@ -1405,76 +1403,6 @@ def _build_multi_check_script(names: List[str], commands: Dict[str, str]) -> str
         parts.append("echo")
     parts.append("exit $failed")
     return "\n".join(parts)
-
-
-def _run_dcgm_check_in_daemonset_pod(
-    node: str, checks: List[str], script: str
-) -> Dict[str, Any]:
-    """
-    Run a dcgmi command in the node's EXISTING DCGM DaemonSet pod.
-
-    Uses the DCGM already on the node (e.g. the GPU Operator's `nvidia-dcgm`
-    DaemonSet, whose nv-hostengine is already live) instead of pulling a DCGM
-    image and launching a pod. There is deliberately no fallback image: when
-    the node has no DCGM pod, the error says so and what to do about it.
-    """
-    if not GPU_DIAG_DCGM_POD_SELECTOR:
-        return {
-            "success": False,
-            "error": (
-                "DCGM checks are disabled: GPU_DIAG_DCGM_POD_SELECTOR is empty, "
-                "so the node's DCGM DaemonSet pod cannot be located."
-            ),
-            "node": node,
-            "checks": checks,
-        }
-    lookup = _run_kubectl(
-        [
-            "get",
-            "pods",
-            "--all-namespaces",
-            "-l",
-            GPU_DIAG_DCGM_POD_SELECTOR,
-            "--field-selector",
-            f"spec.nodeName={node},status.phase=Running",
-            "-o",
-            'jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{"\\n"}{end}',
-        ]
-    )
-    if not lookup.get("success"):
-        lookup["node"] = node
-        lookup["checks"] = checks
-        lookup["error"] = (
-            f"Failed to look up the DCGM DaemonSet pod on node {node!r} "
-            f"(selector {GPU_DIAG_DCGM_POD_SELECTOR!r}): "
-            f"{lookup.get('stderr') or lookup.get('error', 'unknown error')}"
-        )
-        return lookup
-    pods = [line for line in lookup.get("stdout", "").splitlines() if line.strip()]
-    if not pods:
-        return {
-            "success": False,
-            "error": (
-                f"No Running DCGM pod matching selector "
-                f"{GPU_DIAG_DCGM_POD_SELECTOR!r} found on node {node!r}. The "
-                f"dcgm_* checks run dcgmi in the node's existing DCGM DaemonSet "
-                f"pod (e.g. the GPU Operator's nvidia-dcgm DaemonSet) — deploy "
-                f"DCGM on the node or set GPU_DIAG_DCGM_POD_SELECTOR to match "
-                f"your DCGM pods. The nvidia-smi checks (overview, details, "
-                f"throttling, ecc, ...) work without DCGM."
-            ),
-            "node": node,
-            "checks": checks,
-        }
-    namespace, pod_name = pods[0].split("/", 1)
-    result = _run_kubectl(
-        ["exec", pod_name, "-n", namespace, "--", "sh", "-c", script],
-        timeout=GPU_DIAG_TIMEOUT,
-    )
-    result["node"] = node
-    result["checks"] = checks
-    result["dcgm_pod"] = f"{namespace}/{pod_name}"
-    return result
 
 
 @mcp.tool(
@@ -1509,10 +1437,10 @@ def _run_dcgm_check_in_daemonset_pod(
         "(zombie processes keeping GPU memory allocated)\n"
         "- process_info: inspect one host process — requires pid (from "
         "gpu_device_holders or compute_processes)\n"
-        "- dcgm_discovery / dcgm_health / dcgm_diag: DCGM checks, run via the DCGM "
-        "DaemonSet pod already on the node (requires DCGM, e.g. GPU Operator; "
-        "dcgm_diag takes dcgm_diag_level — 1=quick, higher levels run longer and "
-        "may be capped by the operator)\n\n"
+        "- dcgm_discovery / dcgm_health / dcgm_diag: DCGM checks via the host's "
+        "dcgmi (only when the operator enabled DCGM; dcgm_diag takes "
+        "dcgm_diag_level — 1=quick, higher levels run longer and may be capped "
+        "by the operator)\n\n"
         "Start with [\"overview\"] when debugging a GPU node, then batch the "
         "follow-ups (e.g. [\"throttling\",\"ecc\",\"kernel_gpu_errors\"]).\n\n"
         "Example: run_gpu_node_diagnostics(node=\"gpu-node-1\", checks=[\"overview\",\"kernel_gpu_errors\"])"
@@ -1561,7 +1489,6 @@ def run_gpu_node_diagnostics(
                 f"Unknown checks {unknown!r}. Available checks: "
                 f"{', '.join(_gpu_check_names())}."
             )
-        node_names = [c for c in checks if c in NODE_CHECKS]
         dcgm_names = [c for c in checks if c in DCGM_CHECKS]
         if dcgm_names and not DCGM_ENABLED:
             raise ValueError(
@@ -1570,9 +1497,9 @@ def run_gpu_node_diagnostics(
                 f"{', '.join(_gpu_check_names())}."
             )
 
-        node_commands: Dict[str, str] = {}
-        for name in node_names:
-            command = NODE_CHECKS[name]
+        commands: Dict[str, str] = {}
+        for name in checks:
+            command = NODE_CHECKS.get(name) or DCGM_CHECKS[name]
             required = HOST_CHECK_REQUIRED_PARAM.get(name)
             if required == "pid":
                 # Validated strictly because it is substituted into the (server-
@@ -1592,12 +1519,7 @@ def run_gpu_node_diagnostics(
                         "first to find it."
                     )
                 command = command.replace("{bus_id}", pci_bus_id)
-            node_commands[name] = command
-
-        dcgm_commands: Dict[str, str] = {}
-        for name in dcgm_names:
-            command = DCGM_CHECKS[name]
-            if name == "dcgm_diag":
+            elif name == "dcgm_diag":
                 if not 1 <= dcgm_diag_level <= GPU_DIAG_DCGM_MAX_DIAG_LEVEL:
                     raise ValueError(
                         f"dcgm_diag_level must be between 1 and "
@@ -1606,38 +1528,15 @@ def run_gpu_node_diagnostics(
                         f"level 3 stress-tests the GPU). Got: {dcgm_diag_level}."
                     )
                 command = f"{command} {dcgm_diag_level}"
-            dcgm_commands[name] = command
+            commands[name] = command
     except ValueError as e:
         logger.warning(f"run_gpu_node_diagnostics refused: {e}")
         return {"success": False, "error": str(e)}
 
-    results: List[Dict[str, Any]] = []
-    if node_names:
-        # All host-filesystem checks share ONE throwaway pod; the prelude
-        # resolves the node's own nvidia-smi (host PATH or /run/nvidia/driver).
-        script = _NVSMI_PRELUDE + "\n" + _build_multi_check_script(
-            node_names, node_commands
-        )
-        results.append(
-            _run_node_diagnostic_pod(
-                node=node, checks=node_names, argv=["sh", "-c", script]
-            )
-        )
-    if dcgm_names:
-        # All dcgmi checks share ONE exec into the DCGM DaemonSet pod already
-        # on the node — no image pull, and its nv-hostengine is already live.
-        script = _build_multi_check_script(dcgm_names, dcgm_commands)
-        results.append(_run_dcgm_check_in_daemonset_pod(node, dcgm_names, script))
-
-    if len(results) == 1:
-        return results[0]
-    return {
-        "success": all(r.get("success") for r in results),
-        "node": node,
-        "checks": checks,
-        "node_checks": results[0],
-        "dcgm": results[1],
-    }
+    # ALL requested checks share ONE throwaway pod on the node; the prelude
+    # resolves the node's own nvidia-smi (host PATH or /run/nvidia/driver).
+    script = _NVSMI_PRELUDE + "\n" + _build_multi_check_script(checks, commands)
+    return _run_node_diagnostic_pod(node=node, checks=checks, argv=["sh", "-c", script])
 
 
 @mcp.tool(
@@ -1670,7 +1569,6 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
             "image": GPU_DIAG_IMAGE,
             "checks": sorted(NODE_CHECKS),
             "dcgm_enabled": DCGM_ENABLED,
-            "dcgm_pod_selector": GPU_DIAG_DCGM_POD_SELECTOR,
             "dcgm_checks": sorted(DCGM_CHECKS),
             "dcgm_max_diag_level": GPU_DIAG_DCGM_MAX_DIAG_LEVEL,
             "namespace": GPU_DIAG_NAMESPACE,
@@ -1759,8 +1657,7 @@ if __name__ == "__main__":
         logger.info(f"GPU diagnostics image: {GPU_DIAG_IMAGE}")
         logger.info(
             f"GPU DCGM checks enabled: {DCGM_ENABLED} "
-            f"(pod selector: {GPU_DIAG_DCGM_POD_SELECTOR!r}, max diag level: "
-            f"{GPU_DIAG_DCGM_MAX_DIAG_LEVEL})"
+            f"(max diag level: {GPU_DIAG_DCGM_MAX_DIAG_LEVEL})"
         )
         logger.info(f"GPU diagnostics namespace: {GPU_DIAG_NAMESPACE}")
         logger.info(f"GPU diagnostics timeout: {GPU_DIAG_TIMEOUT}s")
