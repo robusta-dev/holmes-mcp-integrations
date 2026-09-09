@@ -286,6 +286,14 @@ GPU_DIAG_NAMESPACE = os.getenv("GPU_DIAG_NAMESPACE", "default")
 # node pulls the CUDA/DCGM image, and dcgmi diag takes a minute by itself.
 GPU_DIAG_TIMEOUT = int(os.getenv("GPU_DIAG_TIMEOUT", "300"))
 
+# Optional explicit binary locations, as absolute paths ON THE HOST filesystem
+# (e.g. /opt/nvidia/bin/nvidia-smi), for installs the built-in search doesn't
+# know. When set, the path is tried FIRST, before the built-in locations.
+# Ignored (with a warning) unless absolute and free of shell metacharacters
+# and whitespace — the value is interpolated into the check script.
+GPU_DIAG_NVIDIA_SMI_PATH = os.getenv("GPU_DIAG_NVIDIA_SMI_PATH", "").strip()
+GPU_DIAG_DCGMI_PATH = os.getenv("GPU_DIAG_DCGMI_PATH", "").strip()
+
 # The nvidia-smi field list for utilization sampling (kept out of the f-string
 # below for readability).
 _GPU_UTIL_QUERY = (
@@ -294,28 +302,91 @@ _GPU_UTIL_QUERY = (
 )
 
 # Every requested check runs under one `sh -c` script INSIDE the throwaway
-# host pod; the script starts with this prelude, which resolves the NODE'S OWN
-# nvidia-smi: on the host PATH (driver installed on the host — most managed
-# GPU node images), or under /run/nvidia/driver (GPU Operator's containerized
-# driver, whose root is bind-visible through the /host mount). No image ever
-# supplies nvidia-smi.
-_NVSMI_PRELUDE = (
-    "if chroot /host sh -c 'command -v nvidia-smi' >/dev/null 2>&1; then "
-    "nvsmi() { chroot /host nvidia-smi \"$@\"; }; "
-    "elif [ -x /host/run/nvidia/driver/usr/bin/nvidia-smi ]; then "
-    "nvsmi() { chroot /host/run/nvidia/driver nvidia-smi \"$@\"; }; "
-    # GKE (COS) installs the driver under /home/kubernetes/bin/nvidia, off the
-    # host PATH; its libs need an explicit LD_LIBRARY_PATH.
-    "elif [ -x /host/home/kubernetes/bin/nvidia/bin/nvidia-smi ]; then "
-    "nvsmi() { chroot /host env "
-    "LD_LIBRARY_PATH=/home/kubernetes/bin/nvidia/lib64 "
-    "/home/kubernetes/bin/nvidia/bin/nvidia-smi \"$@\"; }; "
-    "else "
-    "nvsmi() { echo 'nvidia-smi not found on the node (checked the host PATH, "
-    "/run/nvidia/driver for the GPU Operator containerized driver, and "
-    "/home/kubernetes/bin/nvidia for GKE)'; return 1; }; "
-    "fi"
-)
+# host pod; the script starts with a prelude (built by _build_prelude below)
+# defining `nvsmi` and `dcgmi_run`, which resolve the NODE'S OWN binaries.
+# No image ever supplies them.
+
+
+def _custom_host_path(value: str, var_name: str) -> str:
+    """Return the operator-set host path if usable, else '' (with a warning).
+
+    The value is interpolated into the check script, so anything that is not a
+    plain absolute path is refused. Operator-trusted config, validated only to
+    fail loudly on mistakes.
+    """
+    if not value:
+        return ""
+    if not value.startswith("/") or any(c in value for c in SHELL_CHARS | {" ", "\t"}):
+        logger.warning(
+            "Ignoring %s=%r: must be an absolute path without whitespace or "
+            "shell metacharacters",
+            var_name,
+            value,
+        )
+        return ""
+    return value
+
+
+def _build_prelude() -> str:
+    """
+    Shell prelude resolving the node's own nvidia-smi and dcgmi.
+
+    nvsmi: an operator-set GPU_DIAG_NVIDIA_SMI_PATH is tried first; then the
+    host PATH (driver installed on the host — most managed GPU node images);
+    then /run/nvidia/driver (GPU Operator's containerized driver, bind-visible
+    through the /host mount); then /home/kubernetes/bin/nvidia (GKE/COS, off
+    the host PATH and needing an explicit LD_LIBRARY_PATH).
+
+    dcgmi_run: an operator-set GPU_DIAG_DCGMI_PATH is tried first; then the
+    host PATH — the only place a host install of datacenter-gpu-manager ever
+    puts it. DCGM_ENABLED=true asserts the host has it; the not-found message
+    names that contract.
+    """
+    nvsmi_custom = _custom_host_path(GPU_DIAG_NVIDIA_SMI_PATH, "GPU_DIAG_NVIDIA_SMI_PATH")
+    dcgmi_custom = _custom_host_path(GPU_DIAG_DCGMI_PATH, "GPU_DIAG_DCGMI_PATH")
+
+    nvsmi = ""
+    if nvsmi_custom:
+        nvsmi += (
+            f"if [ -x /host{nvsmi_custom} ]; then "
+            f"nvsmi() {{ chroot /host {nvsmi_custom} \"$@\"; }}; el"
+        )
+    nvsmi += (
+        ("if " if not nvsmi_custom else "")
+        + "chroot /host sh -c 'command -v nvidia-smi' >/dev/null 2>&1; then "
+        "nvsmi() { chroot /host nvidia-smi \"$@\"; }; "
+        "elif [ -x /host/run/nvidia/driver/usr/bin/nvidia-smi ]; then "
+        "nvsmi() { chroot /host/run/nvidia/driver nvidia-smi \"$@\"; }; "
+        "elif [ -x /host/home/kubernetes/bin/nvidia/bin/nvidia-smi ]; then "
+        "nvsmi() { chroot /host env "
+        "LD_LIBRARY_PATH=/home/kubernetes/bin/nvidia/lib64 "
+        "/home/kubernetes/bin/nvidia/bin/nvidia-smi \"$@\"; }; "
+        "else "
+        "nvsmi() { echo 'nvidia-smi not found on the node (checked the host PATH, "
+        "/run/nvidia/driver for the GPU Operator containerized driver, and "
+        "/home/kubernetes/bin/nvidia for GKE; set GPU_DIAG_NVIDIA_SMI_PATH for a "
+        "custom location)'; return 1; }; "
+        "fi"
+    )
+
+    dcgmi = ""
+    if dcgmi_custom:
+        dcgmi += (
+            f"if [ -x /host{dcgmi_custom} ]; then "
+            f"dcgmi_run() {{ chroot /host {dcgmi_custom} \"$@\"; }}; el"
+        )
+    dcgmi += (
+        ("if " if not dcgmi_custom else "")
+        + "chroot /host sh -c 'command -v dcgmi' >/dev/null 2>&1; then "
+        "dcgmi_run() { chroot /host dcgmi \"$@\"; }; "
+        "else "
+        "dcgmi_run() { echo 'dcgmi not found on the node (DCGM_ENABLED=true asserts "
+        "the datacenter-gpu-manager package is installed on GPU hosts; install it, "
+        "set GPU_DIAG_DCGMI_PATH for a custom location, or set DCGM_ENABLED=false)'; "
+        "return 1; }; "
+        "fi"
+    )
+    return nvsmi + "\n" + dcgmi
 
 # nvidia-smi checks — the node's own binary via the prelude above. Every string
 # is a server-owned constant — callers select by name only — so the shell here
@@ -345,19 +416,18 @@ GPU_CHECKS: Dict[str, str] = {
     ),
 }
 
-# DCGM check commands — the host's own dcgmi, like everything else. Opt-in via
-# DCGM_ENABLED; when enabled, dcgmi (and its nv-hostengine service) is assumed
-# to be installed on the host, and its own error is returned verbatim if not.
+# DCGM check commands — the host's own dcgmi (resolved by dcgmi_run in the
+# prelude), like everything else. Opt-in via DCGM_ENABLED; when enabled, dcgmi
+# (and its nv-hostengine service) is assumed to be installed on the host.
 DCGM_CHECKS: Dict[str, str] = {
     # does DCGM see the GPUs at all
-    "dcgm_discovery": "chroot /host dcgmi discovery -l",
+    "dcgm_discovery": "dcgmi_run discovery -l",
     # background health watches: set watches on group 0 (all GPUs), then check
     "dcgm_health": (
-        "chroot /host dcgmi health -g 0 -s a >/dev/null 2>&1; "
-        "chroot /host dcgmi health -g 0 -c"
+        "dcgmi_run health -g 0 -s a >/dev/null 2>&1; dcgmi_run health -g 0 -c"
     ),
     # active diagnostic; the -r level is appended after validation
-    "dcgm_diag": "chroot /host dcgmi diag -r",
+    "dcgm_diag": "dcgmi_run diag -r",
 }
 
 # Kernel/driver/PCIe checks. Same pod, same rules: host binaries run via
@@ -1541,8 +1611,8 @@ def run_gpu_node_diagnostics(
         return {"success": False, "error": str(e)}
 
     # ALL requested checks share ONE throwaway pod on the node; the prelude
-    # resolves the node's own nvidia-smi (host PATH or /run/nvidia/driver).
-    script = _NVSMI_PRELUDE + "\n" + _build_multi_check_script(checks, commands)
+    # resolves the node's own nvidia-smi and dcgmi.
+    script = _build_prelude() + "\n" + _build_multi_check_script(checks, commands)
     return _run_node_diagnostic_pod(node=node, checks=checks, argv=["sh", "-c", script])
 
 
@@ -1578,6 +1648,8 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
             "dcgm_enabled": DCGM_ENABLED,
             "dcgm_checks": sorted(DCGM_CHECKS),
             "dcgm_max_diag_level": GPU_DIAG_DCGM_MAX_DIAG_LEVEL,
+            "nvidia_smi_path": GPU_DIAG_NVIDIA_SMI_PATH,
+            "dcgmi_path": GPU_DIAG_DCGMI_PATH,
             "namespace": GPU_DIAG_NAMESPACE,
             "timeout_seconds": GPU_DIAG_TIMEOUT,
         },

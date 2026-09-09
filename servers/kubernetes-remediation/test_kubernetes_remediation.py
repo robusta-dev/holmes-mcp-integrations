@@ -1029,8 +1029,12 @@ def test_gpu_diagnostics_dcgm_runs_on_host_in_the_same_pod():
     assert args[0] == "run"  # exactly one pod, nothing else
     script = _in_pod_script(args)
     assert "===== dcgm_discovery =====" in script
-    assert "chroot /host dcgmi discovery -l" in script
-    assert "chroot /host dcgmi diag -r 1" in script
+    assert "dcgmi_run discovery -l" in script
+    assert "dcgmi_run diag -r 1" in script
+    # the prelude resolves the host's dcgmi and names the DCGM_ENABLED
+    # contract when it is missing
+    assert "command -v dcgmi" in script
+    assert "DCGM_ENABLED=true asserts" in script
 
 
 def test_gpu_diagnostics_dcgm_diag_level_capped():
@@ -1073,3 +1077,33 @@ def test_config_exposes_gpu_diagnostics_policy():
     assert "dcgm_diag" in gpu["dcgm_checks"]
     assert gpu["dcgm_enabled"] is k.DCGM_ENABLED
     assert gpu["dcgm_max_diag_level"] == k.GPU_DIAG_DCGM_MAX_DIAG_LEVEL
+
+
+def test_gpu_diagnostics_custom_binary_paths_are_tried_first():
+    with patch.object(k, "GPU_DIAG_NVIDIA_SMI_PATH", "/opt/nvidia/bin/nvidia-smi"), \
+         patch.object(k, "GPU_DIAG_DCGMI_PATH", "/opt/dcgm/bin/dcgmi"), \
+         patch.object(k, "DCGM_ENABLED", True):
+        result, args = _run_gpu_check(node="n1", checks=["overview", "dcgm_discovery"])
+    assert result["success"] is True
+    script = _in_pod_script(args)
+    # operator-set paths come before the built-in search
+    assert script.index("/host/opt/nvidia/bin/nvidia-smi") < script.index("command -v nvidia-smi")
+    assert script.index("/host/opt/dcgm/bin/dcgmi") < script.index("command -v dcgmi")
+    # built-in locations remain as fallbacks
+    assert "/host/run/nvidia/driver" in script
+    assert "/host/home/kubernetes/bin/nvidia" in script
+
+
+@pytest.mark.parametrize(
+    "bad_path",
+    ["relative/path", "/path with space", "/tmp/$(reboot)", "/a;b"],
+)
+def test_gpu_diagnostics_invalid_custom_path_ignored(bad_path):
+    # A malformed operator value must not reach the script; the built-in
+    # search stays intact.
+    with patch.object(k, "GPU_DIAG_NVIDIA_SMI_PATH", bad_path):
+        result, args = _run_gpu_check(node="n1", checks=["overview"])
+    assert result["success"] is True
+    script = _in_pod_script(args)
+    assert bad_path not in script
+    assert "command -v nvidia-smi" in script

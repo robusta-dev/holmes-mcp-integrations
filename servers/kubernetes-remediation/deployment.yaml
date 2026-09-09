@@ -77,7 +77,9 @@ spec:
           value: "false"
         # Optional knobs (defaults shown in the README): GPU_DIAG_ENABLED,
         # GPU_DIAG_IMAGE (shell-only pod image, busybox),
-        # GPU_DIAG_DCGM_MAX_DIAG_LEVEL, GPU_DIAG_NAMESPACE, GPU_DIAG_TIMEOUT
+        # GPU_DIAG_DCGM_MAX_DIAG_LEVEL, GPU_DIAG_NAMESPACE, GPU_DIAG_TIMEOUT,
+        # GPU_DIAG_NVIDIA_SMI_PATH / GPU_DIAG_DCGMI_PATH (custom host locations,
+        # tried before the built-in search)
 
         # Enable the approval-gated fallback (set to "false" for a fully locked-down mode)
         - name: KUBECTL_ALLOW_ARBITRARY_COMMANDS
