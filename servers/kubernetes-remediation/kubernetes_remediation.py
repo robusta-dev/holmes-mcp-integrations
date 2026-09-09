@@ -304,9 +304,16 @@ _NVSMI_PRELUDE = (
     "nvsmi() { chroot /host nvidia-smi \"$@\"; }; "
     "elif [ -x /host/run/nvidia/driver/usr/bin/nvidia-smi ]; then "
     "nvsmi() { chroot /host/run/nvidia/driver nvidia-smi \"$@\"; }; "
+    # GKE (COS) installs the driver under /home/kubernetes/bin/nvidia, off the
+    # host PATH; its libs need an explicit LD_LIBRARY_PATH.
+    "elif [ -x /host/home/kubernetes/bin/nvidia/bin/nvidia-smi ]; then "
+    "nvsmi() { chroot /host env "
+    "LD_LIBRARY_PATH=/home/kubernetes/bin/nvidia/lib64 "
+    "/home/kubernetes/bin/nvidia/bin/nvidia-smi \"$@\"; }; "
     "else "
-    "nvsmi() { echo 'nvidia-smi not found on the node (checked the host PATH "
-    "and /run/nvidia/driver for the GPU Operator containerized driver)'; return 1; }; "
+    "nvsmi() { echo 'nvidia-smi not found on the node (checked the host PATH, "
+    "/run/nvidia/driver for the GPU Operator containerized driver, and "
+    "/home/kubernetes/bin/nvidia for GKE)'; return 1; }; "
     "fi"
 )
 

@@ -931,6 +931,9 @@ def test_gpu_diagnostics_builds_readonly_host_pod_pinned_to_node():
     # containerized-driver root — never from the image
     assert "chroot /host nvidia-smi" in script
     assert "/host/run/nvidia/driver" in script
+    # GKE/COS driver location (off the host PATH, needs LD_LIBRARY_PATH)
+    assert "/host/home/kubernetes/bin/nvidia/bin/nvidia-smi" in script
+    assert "LD_LIBRARY_PATH=/home/kubernetes/bin/nvidia/lib64" in script
 
     overrides = _captured_overrides(args)
     spec = overrides["spec"]
