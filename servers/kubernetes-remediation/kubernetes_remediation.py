@@ -1486,13 +1486,13 @@ def _build_multi_check_script(names: List[str], commands: Dict[str, str]) -> str
 @mcp.tool(
     name="run_gpu_node_diagnostics",
     description=(
-        "AUTO-APPROVED (runs immediately, no human needed). Run one or more named "
-        "GPU/driver diagnostic checks on a specific node. A short-lived pod is "
-        "pinned to that node and runs the NODE'S OWN binaries through the host "
-        "filesystem (mounted read-only) — nvidia-smi, dmesg, lspci, modinfo, "
-        "journalctl all come from the node, and the pod is auto-deleted. All "
-        "requested checks run in a single pod — prefer one call with several "
-        "checks over several calls.\n\n"
+        "AUTO-APPROVED (runs immediately, no human needed). Use when debugging a "
+        "GPU node or GPU workload: slow or failing training/inference jobs, GPU "
+        "alerts (XID, ECC, thermal), suspected driver problems, or pods stuck "
+        "waiting for nvidia.com/gpu. Runs one or more named diagnostic checks on "
+        "the node, using the node's own binaries (nvidia-smi, dmesg, lspci, "
+        "journalctl) via a short-lived, auto-deleted pod — prefer one call with "
+        "several checks over several calls.\n\n"
         "Checks (pass a list of names as `checks`):\n"
         "- overview: nvidia-smi — is the driver alive; temperature, power, memory, processes\n"
         "- details: nvidia-smi -q — full per-GPU detail\n"
