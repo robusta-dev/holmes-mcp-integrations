@@ -887,9 +887,11 @@ def _in_pod_script(run_args):
 
 
 def _run_gpu_check(**kwargs):
-    """Call run_gpu_node_diagnostics with kubectl and the cleanup delete mocked;
-    returns (result, captured kubectl args or None)."""
-    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m, \
+    """Call run_gpu_node_diagnostics (with the opt-in feature flag on) with
+    kubectl and the cleanup delete mocked; returns (result, captured kubectl
+    args or None)."""
+    with patch.object(k, "GPU_DIAG_ENABLED", True), \
+         patch.object(k, "_run_kubectl", return_value={"success": True}) as m, \
          patch.object(k.subprocess, "run") as _delete:
         result = k.run_gpu_node_diagnostics(**kwargs)
     return result, (m.call_args.args[0] if m.call_args else None)
@@ -1048,16 +1050,20 @@ def test_gpu_diagnostics_dcgm_diag_level_capped():
     assert "GPU_DIAG_DCGM_MAX_DIAG_LEVEL" in result["error"]
 
 
-def test_gpu_diagnostics_refused_when_feature_disabled():
-    with patch.object(k, "GPU_DIAG_ENABLED", False):
-        result, args = _run_gpu_check(node="n1", checks=["overview"])
-    assert args is None
+def test_gpu_diagnostics_off_by_default():
+    # Opt-in: without GPU_DIAG_ENABLED=true nothing is launched and the
+    # refusal names the toggle.
+    assert k.GPU_DIAG_ENABLED is False
+    with patch.object(k, "_run_kubectl") as m, patch.object(k.subprocess, "run"):
+        result = k.run_gpu_node_diagnostics(node="n1", checks=["overview"])
+    m.assert_not_called()
+    assert result["success"] is False
     assert "GPU_DIAG_ENABLED" in result["error"]
 
 
 def test_gpu_diagnostics_pod_deleted_even_on_timeout():
     # The finally-delete must fire even when the run itself fails.
-    with patch.object(
+    with patch.object(k, "GPU_DIAG_ENABLED", True), patch.object(
         k, "_run_kubectl", return_value={"success": False, "error": "timed out"}
     ), patch.object(k.subprocess, "run") as delete:
         k.run_gpu_node_diagnostics(node="n1", checks=["overview"])

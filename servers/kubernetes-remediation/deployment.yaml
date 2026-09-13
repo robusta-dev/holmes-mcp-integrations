@@ -67,15 +67,16 @@ spec:
         - name: KUBECTL_FILE_READ_DENIED_PATHS
           value: "/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/"
 
-        # ---- GPU node diagnostics ----
-        # run_gpu_node_diagnostics works with no configuration: it runs the
-        # NODE'S OWN binaries (nvidia-smi, dmesg, lspci, ...) through a
-        # read-only host-filesystem mount — no custom image. Only DCGM is
-        # opt-in: when enabled, the host is assumed to have dcgmi installed
-        # (dcgm_* checks run it via chroot /host like everything else).
+        # ---- GPU node diagnostics (opt-in) ----
+        # run_gpu_node_diagnostics runs the NODE'S OWN binaries (nvidia-smi,
+        # dmesg, lspci, ...) through a read-only host-filesystem mount — no
+        # custom image. DCGM checks additionally require dcgmi installed on
+        # the GPU hosts.
+        - name: GPU_DIAG_ENABLED
+          value: "false"
         - name: DCGM_ENABLED
           value: "false"
-        # Optional knobs (defaults shown in the README): GPU_DIAG_ENABLED,
+        # Optional knobs (defaults shown in the README):
         # GPU_DIAG_DCGM_MAX_DIAG_LEVEL, GPU_DIAG_NAMESPACE, GPU_DIAG_TIMEOUT,
         # GPU_DIAG_NVIDIA_SMI_PATH / GPU_DIAG_DCGMI_PATH (custom host locations,
         # tried before the built-in search)

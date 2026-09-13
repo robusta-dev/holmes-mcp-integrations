@@ -263,8 +263,9 @@ DIAGNOSTIC_HTTP_CLIENTS = {"curl", "wget"}
 # a shell except those validated scalars — so even prompt-injected content can
 # only trigger the fixed read-only checks, never compose a command.
 
-# Master switch for GPU node diagnostics.
-GPU_DIAG_ENABLED = _env_bool("GPU_DIAG_ENABLED", True)
+# Master switch for GPU node diagnostics. Off by default: the tool launches
+# privileged host-mount pods, so operators opt in.
+GPU_DIAG_ENABLED = _env_bool("GPU_DIAG_ENABLED", False)
 
 # Pod image (fixed, not configurable): it only supplies a shell — every
 # diagnostic binary comes from the node via the read-only /host mount.

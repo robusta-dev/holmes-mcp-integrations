@@ -86,7 +86,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `KUBECTL_TIMEOUT` | `60` | per-command timeout (s) |
 | `LOG_LEVEL` | `INFO` | logging |
 | `MCP_AUTH_TOKEN` | *(unset)* | bearer token required on every HTTP-transport request; unset = unauthenticated (a startup warning is logged) |
-| `GPU_DIAG_ENABLED` | `true` | master switch for both GPU node diagnostics tools |
+| `GPU_DIAG_ENABLED` | `false` | **opt-in**: enable the GPU node diagnostics tool (it launches privileged host-mount pods) |
 | `DCGM_ENABLED` | `false` | **opt-in**: enable the `dcgm_*` checks — when enabled, `dcgmi` (with its `nv-hostengine` service) is assumed installed on the host and runs via `chroot /host` like every other check |
 | `GPU_DIAG_DCGM_MAX_DIAG_LEVEL` | `1` | highest `dcgmi diag -r <level>` allowed (levels 2–3 run long; 3 stress-tests the GPU) |
 | `GPU_DIAG_NVIDIA_SMI_PATH` | *(unset)* | optional absolute host path of `nvidia-smi`, tried before the built-in search (host PATH → `/run/nvidia/driver` → `/home/kubernetes/bin/nvidia`) — for custom install locations |
@@ -137,8 +137,8 @@ server-owned constant; the only caller-supplied values that reach one are a
 numeric `pid`, a `[0-9a-fA-F:.]`-validated PCI bus id, and a bounds-checked
 `dcgmi diag` level. The accepted residual exposure is what the checks print —
 notably `process_info`/host process state, where secrets passed as process CLI
-args can appear. `GPU_DIAG_ENABLED=false` removes the capability entirely for
-operators who don't accept that trade-off.
+args can appear. The tool is **off by default** — operators opt in with
+`GPU_DIAG_ENABLED=true`.
 
 ## Diagnostic-pod target policy
 
