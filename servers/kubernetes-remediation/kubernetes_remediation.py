@@ -266,8 +266,9 @@ DIAGNOSTIC_HTTP_CLIENTS = {"curl", "wget"}
 # Master switch for GPU node diagnostics.
 GPU_DIAG_ENABLED = _env_bool("GPU_DIAG_ENABLED", True)
 
-# Pod image: only needs a shell — every diagnostic binary comes from the node.
-GPU_DIAG_IMAGE = os.getenv("GPU_DIAG_IMAGE", "busybox:1.37.0")
+# Pod image (fixed, not configurable): it only supplies a shell — every
+# diagnostic binary comes from the node via the read-only /host mount.
+GPU_DIAG_POD_IMAGE = "busybox:1.37.0"
 
 # DCGM checks (dcgmi discovery/health/diag) are opt-in. When enabled, dcgmi is
 # assumed to be installed ON THE HOST (with its nv-hostengine service running)
@@ -1423,7 +1424,7 @@ def _run_node_diagnostic_pod(
     run_args = [
         "run",
         pod_name,
-        f"--image={GPU_DIAG_IMAGE}",
+        f"--image={GPU_DIAG_POD_IMAGE}",
         "--restart=Never",
         "--rm",
         "-i",
@@ -1453,7 +1454,7 @@ def _run_node_diagnostic_pod(
     # output belongs to, and self-correct on failure.
     result["node"] = node
     result["checks"] = checks
-    result["image"] = GPU_DIAG_IMAGE
+    result["image"] = GPU_DIAG_POD_IMAGE
     return result
 
 
@@ -1643,7 +1644,7 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
         "timeout_seconds": TIMEOUT,
         "gpu_node_diagnostics": {
             "enabled": GPU_DIAG_ENABLED,
-            "image": GPU_DIAG_IMAGE,
+            "image": GPU_DIAG_POD_IMAGE,
             "checks": sorted(NODE_CHECKS),
             "dcgm_enabled": DCGM_ENABLED,
             "dcgm_checks": sorted(DCGM_CHECKS),
@@ -1733,7 +1734,7 @@ if __name__ == "__main__":
     logger.info(f"Timeout: {TIMEOUT}s")
     logger.info(f"GPU node diagnostics enabled: {GPU_DIAG_ENABLED}")
     if GPU_DIAG_ENABLED:
-        logger.info(f"GPU diagnostics image: {GPU_DIAG_IMAGE}")
+        logger.info(f"GPU diagnostics image: {GPU_DIAG_POD_IMAGE}")
         logger.info(
             f"GPU DCGM checks enabled: {DCGM_ENABLED} "
             f"(max diag level: {GPU_DIAG_DCGM_MAX_DIAG_LEVEL})"

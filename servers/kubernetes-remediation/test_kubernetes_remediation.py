@@ -924,7 +924,7 @@ def test_gpu_diagnostics_builds_readonly_host_pod_pinned_to_node():
     assert result["checks"] == ["overview"]
     assert args[0] == "run"
     # the pod image only supplies a shell; all binaries come from the node
-    assert f"--image={k.GPU_DIAG_IMAGE}" in args
+    assert f"--image={k.GPU_DIAG_POD_IMAGE}" in args
     script = _in_pod_script(args)
     assert "===== overview =====" in script
     # nvidia-smi is resolved from the node: host PATH or the GPU Operator's
@@ -1070,7 +1070,7 @@ def test_config_exposes_gpu_diagnostics_policy():
     config = k.get_remediation_mcp_config()
     gpu = config["gpu_node_diagnostics"]
     assert gpu["enabled"] is k.GPU_DIAG_ENABLED
-    assert gpu["image"] == k.GPU_DIAG_IMAGE
+    assert gpu["image"] == k.GPU_DIAG_POD_IMAGE
     # one catalog: nvidia-smi and kernel checks together
     assert "overview" in gpu["checks"]
     assert "kernel_gpu_errors" in gpu["checks"]
