@@ -15,10 +15,16 @@ is encoded in the tool set, never guessed per-command:
     - read_file_from_container          (path allow/deny policy)
     - run_preapproved_kubectl_exec_command  (read-only in-container binary allowlist)
     - run_preapproved_diagnostic_image      (troubleshooting image allowlist)
+    - run_gpu_node_diagnostics          (named GPU/driver checks via a node-pinned
+                                         privileged pod that runs the NODE'S OWN
+                                         binaries through the host filesystem,
+                                         mounted read-only; auto-approvable
+                                         because the caller picks only check
+                                         NAMES — every command is server-owned)
     - get_remediation_mcp_config        (effective policy, debugging)
 
-  Approval-gated (mutations / arbitrary exec — HolmesGPT always prompts a human):
-    - run_kubectl_command
+  Approval-gated (HolmesGPT always prompts a human):
+    - run_kubectl_command               (mutations / arbitrary exec)
 
 All *policy* (command/image/path allowlists, the arbitrary toggle, the hard verb
 allowlist, the flag blocklist) lives here in the server. HolmesGPT only maps
@@ -239,9 +245,270 @@ DIAGNOSTIC_REDIRECT_FLAGS = {
 # the bundled-short-flag check, so `ls -L` in busybox is not caught by it.
 DIAGNOSTIC_HTTP_CLIENTS = {"curl", "wget"}
 
+# ── GPU node diagnostics ──────────────────────────────────────────────────────
+#
+# One tool, AUTO-APPROVED: run_gpu_node_diagnostics launches a short-lived pod
+# pinned to the node — privileged, hostPID, with the host root mounted
+# READ-ONLY at /host — and runs the NODE'S OWN binaries (nvidia-smi, dmesg,
+# lspci, modinfo, journalctl) via `chroot /host`. No special image: the pod
+# image only supplies a shell (busybox). nvidia-smi is resolved from the host
+# PATH, with a fallback to /run/nvidia/driver for GPU Operator clusters that
+# run the containerized driver. The dcgm_* checks run `dcgmi` from the host
+# too, and are opt-in (DCGM_ENABLED) since not every node has DCGM installed.
+#
+# What makes this auto-approvable under the "approval is a property of the
+# tool" design: the caller picks only the node and check NAMES (plus a couple
+# of strictly validated scalars: a pid, a PCI bus id, a dcgm diag level). Every
+# command string is server-owned — nothing the model sends is interpolated into
+# a shell except those validated scalars — so even prompt-injected content can
+# only trigger the fixed read-only checks, never compose a command.
+
+# Master switch for GPU node diagnostics. Off by default: the tool launches
+# privileged host-mount pods, so operators opt in.
+GPU_DIAG_ENABLED = _env_bool("GPU_DIAG_ENABLED", False)
+
+# Pod image (fixed, not configurable): it only supplies a shell — every
+# diagnostic binary comes from the node via the read-only /host mount.
+GPU_DIAG_POD_IMAGE = "busybox:1.37.0"
+
+# DCGM checks (dcgmi discovery/health/diag) are opt-in. When enabled, dcgmi is
+# assumed to be installed ON THE HOST (with its nv-hostengine service running)
+# and runs via `chroot /host` like every other check; if it isn't there, the
+# check returns dcgmi's own error verbatim. Off by default.
+DCGM_ENABLED = _env_bool("DCGM_ENABLED", False)
+# Highest `dcgmi diag -r <level>` the auto-approved tool may run. Levels 2 and 3
+# take minutes and level 3 actively stresses the GPU, so operators opt in.
+GPU_DIAG_DCGM_MAX_DIAG_LEVEL = int(os.getenv("GPU_DIAG_DCGM_MAX_DIAG_LEVEL", "1"))
+
+# Namespace the diagnostic pods run in (the Helm chart sets the release
+# namespace, where the diagnostic-pod egress NetworkPolicy is applied).
+GPU_DIAG_NAMESPACE = os.getenv("GPU_DIAG_NAMESPACE", "default")
+
+# Per-check timeout. Larger than KUBECTL_TIMEOUT because the first run on a
+# node pulls the CUDA/DCGM image, and dcgmi diag takes a minute by itself.
+GPU_DIAG_TIMEOUT = int(os.getenv("GPU_DIAG_TIMEOUT", "300"))
+
+# Optional explicit binary locations, as absolute paths ON THE HOST filesystem
+# (e.g. /opt/nvidia/bin/nvidia-smi), for installs the built-in search doesn't
+# know. When set, the path is tried FIRST, before the built-in locations.
+# Ignored (with a warning) unless absolute and free of shell metacharacters
+# and whitespace — the value is interpolated into the check script.
+GPU_DIAG_NVIDIA_SMI_PATH = os.getenv("GPU_DIAG_NVIDIA_SMI_PATH", "").strip()
+GPU_DIAG_DCGMI_PATH = os.getenv("GPU_DIAG_DCGMI_PATH", "").strip()
+
+# The nvidia-smi field list for utilization sampling (kept out of the f-string
+# below for readability).
+_GPU_UTIL_QUERY = (
+    "--query-gpu=timestamp,name,temperature.gpu,utilization.gpu,"
+    "memory.used,memory.total,clocks_throttle_reasons.active"
+)
+
+# Every requested check runs under one `sh -c` script INSIDE the throwaway
+# host pod; the script starts with a prelude (built by _build_prelude below)
+# defining `nvsmi` and `dcgmi_run`, which resolve the NODE'S OWN binaries.
+# No image ever supplies them.
+
+
+def _custom_host_path(value: str, var_name: str) -> str:
+    """Return the operator-set host path if usable, else '' (with a warning).
+
+    The value is interpolated into the check script, so anything that is not a
+    plain absolute path is refused. Operator-trusted config, validated only to
+    fail loudly on mistakes.
+    """
+    if not value:
+        return ""
+    if not value.startswith("/") or any(c in value for c in SHELL_CHARS | {" ", "\t"}):
+        logger.warning(
+            "Ignoring %s=%r: must be an absolute path without whitespace or "
+            "shell metacharacters",
+            var_name,
+            value,
+        )
+        return ""
+    return value
+
+
+def _build_prelude() -> str:
+    """
+    Shell prelude resolving the node's own nvidia-smi and dcgmi.
+
+    nvsmi: an operator-set GPU_DIAG_NVIDIA_SMI_PATH is tried first; then the
+    host PATH (driver installed on the host — most managed GPU node images);
+    then /run/nvidia/driver (GPU Operator's containerized driver, bind-visible
+    through the /host mount); then /home/kubernetes/bin/nvidia (GKE/COS, off
+    the host PATH and needing an explicit LD_LIBRARY_PATH).
+
+    dcgmi_run: an operator-set GPU_DIAG_DCGMI_PATH is tried first; then the
+    host PATH — the only place a host install of datacenter-gpu-manager ever
+    puts it. DCGM_ENABLED=true asserts the host has it; the not-found message
+    names that contract.
+    """
+    nvsmi_custom = _custom_host_path(GPU_DIAG_NVIDIA_SMI_PATH, "GPU_DIAG_NVIDIA_SMI_PATH")
+    dcgmi_custom = _custom_host_path(GPU_DIAG_DCGMI_PATH, "GPU_DIAG_DCGMI_PATH")
+
+    nvsmi = ""
+    if nvsmi_custom:
+        nvsmi += (
+            f"if [ -x /host{nvsmi_custom} ]; then "
+            f"nvsmi() {{ chroot /host {nvsmi_custom} \"$@\"; }}; el"
+        )
+    nvsmi += (
+        ("if " if not nvsmi_custom else "")
+        + "chroot /host sh -c 'command -v nvidia-smi' >/dev/null 2>&1; then "
+        "nvsmi() { chroot /host nvidia-smi \"$@\"; }; "
+        "elif [ -x /host/run/nvidia/driver/usr/bin/nvidia-smi ]; then "
+        "nvsmi() { chroot /host/run/nvidia/driver nvidia-smi \"$@\"; }; "
+        "elif [ -x /host/home/kubernetes/bin/nvidia/bin/nvidia-smi ]; then "
+        "nvsmi() { chroot /host env "
+        "LD_LIBRARY_PATH=/home/kubernetes/bin/nvidia/lib64 "
+        "/home/kubernetes/bin/nvidia/bin/nvidia-smi \"$@\"; }; "
+        "else "
+        "nvsmi() { echo 'nvidia-smi not found on the node (checked the host PATH, "
+        "/run/nvidia/driver for the GPU Operator containerized driver, and "
+        "/home/kubernetes/bin/nvidia for GKE; set GPU_DIAG_NVIDIA_SMI_PATH for a "
+        "custom location)'; return 1; }; "
+        "fi"
+    )
+
+    dcgmi = ""
+    if dcgmi_custom:
+        dcgmi += (
+            f"if [ -x /host{dcgmi_custom} ]; then "
+            f"dcgmi_run() {{ chroot /host {dcgmi_custom} \"$@\"; }}; el"
+        )
+    dcgmi += (
+        ("if " if not dcgmi_custom else "")
+        + "chroot /host sh -c 'command -v dcgmi' >/dev/null 2>&1; then "
+        "dcgmi_run() { chroot /host dcgmi \"$@\"; }; "
+        "else "
+        "dcgmi_run() { echo 'dcgmi not found on the node (DCGM_ENABLED=true asserts "
+        "the datacenter-gpu-manager package is installed on GPU hosts; install it, "
+        "set GPU_DIAG_DCGMI_PATH for a custom location, or set DCGM_ENABLED=false)'; "
+        "return 1; }; "
+        "fi"
+    )
+    return nvsmi + "\n" + dcgmi
+
+# nvidia-smi checks — the node's own binary via the prelude above. Every string
+# is a server-owned constant — callers select by name only — so the shell here
+# is not an injection surface.
+GPU_CHECKS: Dict[str, str] = {
+    # nvidia-smi: driver alive? temperature, power, memory, ECC summary, processes
+    "overview": "nvsmi",
+    # full per-GPU detail: throttle reasons, ECC counts, retired pages, clocks
+    "details": "nvsmi -q",
+    # throttling investigation: temperature/power/clock sections only
+    "throttling": "nvsmi -q -d TEMPERATURE,POWER,CLOCK",
+    # ~30s of live samples (6 samples, 5s apart) to catch transient spikes
+    "utilization_samples": (
+        f"nvsmi {_GPU_UTIL_QUERY} --format=csv; "
+        f"for i in 1 2 3 4 5; do sleep 5; "
+        f"nvsmi {_GPU_UTIL_QUERY} --format=csv,noheader; done"
+    ),
+    # volatile + aggregate ECC error counts
+    "ecc": "nvsmi -q -d ECC",
+    # retired pages (pending retirement => node needs a reboot)
+    "page_retirement": "nvsmi -q -d PAGE_RETIREMENT",
+    # A100/H100-generation equivalent of page retirement
+    "row_remapper": "nvsmi -q -d ROW_REMAPPER",
+    # which processes hold GPU memory (zombie/leak hunting)
+    "compute_processes": (
+        "nvsmi --query-compute-apps=pid,process_name,used_memory --format=csv"
+    ),
+}
+
+# DCGM check commands — the host's own dcgmi (resolved by dcgmi_run in the
+# prelude), like everything else. Opt-in via DCGM_ENABLED; when enabled, dcgmi
+# (and its nv-hostengine service) is assumed to be installed on the host.
+DCGM_CHECKS: Dict[str, str] = {
+    # does DCGM see the GPUs at all
+    "dcgm_discovery": "dcgmi_run discovery -l",
+    # background health watches: set watches on group 0 (all GPUs), then check
+    "dcgm_health": (
+        "dcgmi_run health -g 0 -s a >/dev/null 2>&1; dcgmi_run health -g 0 -c"
+    ),
+    # active diagnostic; the -r level is appended after validation
+    "dcgm_diag": "dcgmi_run diag -r",
+}
+
+# Kernel/driver/PCIe checks. Same pod, same rules: host binaries run via
+# `chroot /host`, and the host's processes/kernel are visible through the pod's
+# own /proc (shared kernel + hostPID). {pid} / {bus_id} placeholders are filled
+# only with values that passed the strict validators below.
+HOST_CHECKS: Dict[str, str] = {
+    # XID errors, "GPU has fallen off the bus", driver load failures
+    "kernel_gpu_errors": (
+        "(chroot /host dmesg -T 2>/dev/null || dmesg) "
+        "| grep -iE 'xid|nvrm|nvidia' | tail -n 200 "
+        "|| echo 'no NVIDIA-related kernel messages found'"
+    ),
+    # last 2h of kernel journal mentions (systemd hosts)
+    "kernel_log_journal": (
+        "chroot /host journalctl -k --since '-2h' --no-pager 2>&1 "
+        "| grep -i nvidia | tail -n 200 "
+        "|| echo 'journalctl unavailable or no NVIDIA kernel-journal entries in the last 2h'"
+    ),
+    # kernel module loaded? module version vs /proc/driver/nvidia/version
+    # (a mismatch here is the classic post-driver-upgrade 'Driver/library
+    # version mismatch' failure)
+    "driver_info": (
+        "echo '== loaded nvidia kernel modules (lsmod) =='; "
+        "lsmod | grep -i nvidia || echo 'no nvidia modules loaded'; "
+        "echo; echo '== modinfo nvidia (on-disk module) =='; "
+        "chroot /host modinfo nvidia 2>&1 | head -n 20; "
+        "echo; echo '== /proc/driver/nvidia/version (running driver) =='; "
+        "cat /proc/driver/nvidia/version 2>&1"
+    ),
+    # does the PCIe bus even see the GPU
+    "pci": (
+        "chroot /host lspci 2>/dev/null | grep -i nvidia "
+        "|| { echo 'lspci unavailable on host; scanning /sys for NVIDIA (0x10de) devices:'; "
+        "grep -li 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null "
+        "|| echo 'no NVIDIA PCI devices found'; }"
+    ),
+    # PCIe link width/speed degradation for one device ({bus_id} validated)
+    "pci_link": (
+        "chroot /host lspci -vvv -s {bus_id} 2>&1 | grep -iE 'lnk|lnkcap|lnksta' "
+        "|| echo 'lspci unavailable on host or no link info for device {bus_id}'"
+    ),
+    # nvidia-fabricmanager must run on NVSwitch (HGX A100/H100) systems
+    "fabric_manager": (
+        "chroot /host systemctl status nvidia-fabricmanager --no-pager 2>&1 "
+        "|| { echo '--- systemctl unavailable, falling back to process check ---'; "
+        "ps 2>/dev/null | grep -i 'fabricmanager' | grep -v grep "
+        "|| echo 'nv-fabricmanager process not found'; }"
+    ),
+    # which host processes hold /dev/nvidia* open (zombie processes keeping
+    # GPU memory allocated after their pod died)
+    "gpu_device_holders": (
+        "found=0; "
+        "for p in /proc/[0-9]*; do "
+        "if ls -l \"$p/fd\" 2>/dev/null | grep -q '/dev/nvidia'; then "
+        "echo \"pid $(basename \"$p\") comm=$(cat \"$p/comm\" 2>/dev/null)\"; found=1; "
+        "fi; done; "
+        "if [ \"$found\" -eq 0 ]; then echo 'no processes holding /dev/nvidia* devices'; fi"
+    ),
+    # inspect one host process by pid ({pid} validated numeric)
+    "process_info": (
+        "echo '== /proc/{pid} =='; ls -la /proc/{pid}/ 2>&1; "
+        "echo; echo '== status =='; head -n 25 /proc/{pid}/status 2>&1; "
+        "echo; echo '== cmdline =='; tr '\\0' ' ' < /proc/{pid}/cmdline 2>/dev/null; echo"
+    ),
+}
+
+# Checks that take a parameter, and the parameter they require.
+HOST_CHECK_REQUIRED_PARAM = {"pci_link": "pci_bus_id", "process_info": "pid"}
+
+_PCI_BUS_ID_RE = re.compile(r"^[0-9a-fA-F:.]{1,16}$")
+
+# The always-available catalog; the opt-in DCGM_CHECKS run in the same pod
+# when DCGM_ENABLED is set.
+NODE_CHECKS: Dict[str, str] = {**GPU_CHECKS, **HOST_CHECKS}
+
 
 # Create MCP server
-mcp = FastMCP(name="kubernetes-remediation", version="1.2.0")
+mcp = FastMCP(name="kubernetes-remediation", version="1.3.0")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,8 +590,9 @@ def build_http_app():
 # Low-level execution
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_kubectl(args: List[str]) -> Dict[str, Any]:
+def _run_kubectl(args: List[str], timeout: Optional[int] = None) -> Dict[str, Any]:
     """Execute kubectl with shell=False and a timeout. Returns a result dict."""
+    effective_timeout = timeout if timeout is not None else TIMEOUT
     try:
         logger.info(f"Executing kubectl with args: {args}")
         result = subprocess.run(
@@ -332,7 +600,7 @@ def _run_kubectl(args: List[str]) -> Dict[str, Any]:
             shell=False,
             capture_output=True,
             text=True,
-            timeout=TIMEOUT,
+            timeout=effective_timeout,
         )
         return {
             "success": result.returncode == 0,
@@ -341,10 +609,12 @@ def _run_kubectl(args: List[str]) -> Dict[str, Any]:
             "return_code": result.returncode,
         }
     except subprocess.TimeoutExpired:
-        logger.error(f"Command timed out after {TIMEOUT}s: kubectl {' '.join(args)}")
+        logger.error(
+            f"Command timed out after {effective_timeout}s: kubectl {' '.join(args)}"
+        )
         return {
             "success": False,
-            "error": f"Command timed out after {TIMEOUT} seconds",
+            "error": f"Command timed out after {effective_timeout} seconds",
             "stdout": "",
             "stderr": "",
         }
@@ -1101,6 +1371,253 @@ def run_preapproved_diagnostic_image(
         )
 
 
+def _build_node_diagnostic_overrides(pod_name: str, node: str) -> Dict[str, Any]:
+    """
+    Build the server-controlled pod override for a node-pinned diagnostic pod.
+
+    The shape is what `kubectl debug node/` would build: privileged + hostPID +
+    the host root mounted READ-ONLY at /host, so every diagnostic runs the
+    NODE'S OWN binaries — the pod image contributes nothing but a shell. The
+    exposure stays bounded because the tool only runs the fixed check catalog.
+
+    Shared hardening with run_preapproved_diagnostic_image: no ServiceAccount
+    token, memory-capped, and the robusta.dev/diagnostic-pod label so the
+    operator's egress NetworkPolicy applies. nodeName pins the pod to the node
+    under investigation (bypassing the scheduler, so a cordoned node can still
+    be diagnosed); the blanket toleration keeps NoExecute taints (common on GPU
+    nodes) from evicting the pod mid-check.
+    """
+    return {
+        "metadata": {"labels": {"robusta.dev/diagnostic-pod": "true"}},
+        "spec": {
+            "nodeName": node,
+            "automountServiceAccountToken": False,
+            "hostNetwork": False,
+            "hostIPC": False,
+            "hostPID": True,
+            "tolerations": [{"operator": "Exists"}],
+            "volumes": [{"name": "host-root", "hostPath": {"path": "/"}}],
+            "containers": [
+                {
+                    "name": pod_name,
+                    "securityContext": {"privileged": True},
+                    "volumeMounts": [
+                        {"name": "host-root", "mountPath": "/host", "readOnly": True}
+                    ],
+                    "resources": {
+                        "requests": {"cpu": "50m", "memory": "64Mi"},
+                        "limits": {"memory": "512Mi"},
+                    },
+                }
+            ],
+        },
+    }
+
+
+def _run_node_diagnostic_pod(
+    node: str,
+    checks: List[str],
+    argv: List[str],
+) -> Dict[str, Any]:
+    """Launch a node-pinned diagnostic pod, capture its output, auto-delete it."""
+    pod_name = f"k8s-remediation-gpu-{uuid.uuid4().hex[:8]}"
+    overrides = _build_node_diagnostic_overrides(pod_name, node)
+    run_args = [
+        "run",
+        pod_name,
+        f"--image={GPU_DIAG_POD_IMAGE}",
+        "--restart=Never",
+        "--rm",
+        "-i",
+        "-n",
+        GPU_DIAG_NAMESPACE,
+        f"--pod-running-timeout={GPU_DIAG_TIMEOUT}s",
+        "--override-type=strategic",
+        "--overrides",
+        json.dumps(overrides),
+        "--command",
+        "--",
+        *argv,
+    ]
+    try:
+        result = _run_kubectl(run_args, timeout=GPU_DIAG_TIMEOUT)
+    finally:
+        # Ensure the pod is gone even if --rm didn't fire (e.g. on timeout).
+        subprocess.run(
+            ["kubectl", "delete", "pod", pod_name, "-n", GPU_DIAG_NAMESPACE,
+             "--ignore-not-found", "--wait=false"],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
+    # Context so the model (and logs) can tell which checks on which node this
+    # output belongs to, and self-correct on failure.
+    result["node"] = node
+    result["checks"] = checks
+    result["image"] = GPU_DIAG_POD_IMAGE
+    return result
+
+
+def _gpu_check_names() -> List[str]:
+    names = sorted(NODE_CHECKS)
+    if DCGM_ENABLED:
+        names += sorted(DCGM_CHECKS)
+    return names
+
+
+def _build_multi_check_script(names: List[str], commands: Dict[str, str]) -> str:
+    """
+    Concatenate the requested checks into one shell script so a single pod
+    answers them all. Each check prints a `===== <name> =====` header before
+    its output, a failing check does not stop the ones after it, and the
+    script exits non-zero if any check failed. All inputs are server-owned
+    constants (plus the already-validated pid/bus-id/diag-level
+    substitutions), so this is not an injection surface.
+    """
+    parts = ["failed=0"]
+    for name in names:
+        parts.append(f"echo '===== {name} ====='")
+        parts.append(f"{{ {commands[name]} ; }} || failed=1")
+        parts.append("echo")
+    parts.append("exit $failed")
+    return "\n".join(parts)
+
+
+@mcp.tool(
+    name="run_gpu_node_diagnostics",
+    description=(
+        "AUTO-APPROVED (runs immediately, no human needed). Use when debugging a "
+        "GPU node or GPU workload: slow or failing training/inference jobs, GPU "
+        "alerts (XID, ECC, thermal), suspected driver problems, or pods stuck "
+        "waiting for nvidia.com/gpu. Runs one or more named diagnostic checks on "
+        "the node, using the node's own binaries (nvidia-smi, dmesg, lspci, "
+        "journalctl) via a short-lived, auto-deleted pod — prefer one call with "
+        "several checks over several calls.\n\n"
+        "Checks (pass a list of names as `checks`):\n"
+        "- overview: nvidia-smi — is the driver alive; temperature, power, memory, processes\n"
+        "- details: nvidia-smi -q — full per-GPU detail\n"
+        "- throttling: temperature/power/clock sections and active throttle reasons\n"
+        "- utilization_samples: ~30s of csv samples (temp, utilization, memory)\n"
+        "- ecc: volatile + aggregate ECC error counts\n"
+        "- page_retirement: retired pages (pending retirement means the node needs a reboot)\n"
+        "- row_remapper: A100/H100-generation remapped-rows state\n"
+        "- compute_processes: which processes hold GPU memory\n"
+        "- kernel_gpu_errors: dmesg XID/NVRM errors ('GPU has fallen off the bus', "
+        "driver load failures)\n"
+        "- kernel_log_journal: last 2h of NVIDIA kernel-journal entries\n"
+        "- driver_info: loaded module vs on-disk module vs running driver version "
+        "(detects driver/library version mismatch)\n"
+        "- pci: does the PCIe bus see the GPU at all\n"
+        "- pci_link: link width/speed for one device — requires pci_bus_id "
+        "(e.g. \"01:00.0\", from the `pci` check)\n"
+        "- fabric_manager: nvidia-fabricmanager status (NVSwitch/HGX systems)\n"
+        "- gpu_device_holders: host processes holding /dev/nvidia* open "
+        "(zombie processes keeping GPU memory allocated)\n"
+        "- process_info: inspect one host process — requires pid (from "
+        "gpu_device_holders or compute_processes)\n"
+        "- dcgm_discovery / dcgm_health / dcgm_diag: DCGM checks via the host's "
+        "dcgmi (only when the operator enabled DCGM; dcgm_diag takes "
+        "dcgm_diag_level — 1=quick, higher levels run longer and may be capped "
+        "by the operator)\n\n"
+        "Start with [\"overview\"] when debugging a GPU node, then batch the "
+        "follow-ups (e.g. [\"throttling\",\"ecc\",\"kernel_gpu_errors\"]).\n\n"
+        "Example: run_gpu_node_diagnostics(node=\"gpu-node-1\", checks=[\"overview\",\"kernel_gpu_errors\"])"
+    ),
+)
+def run_gpu_node_diagnostics(
+    node: str,
+    checks: List[str],
+    dcgm_diag_level: int = 1,
+    pid: Optional[int] = None,
+    pci_bus_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Run one or more pre-defined GPU diagnostic checks on a node, using the
+    node's own binaries via a read-only host-filesystem mount.
+
+    Read-only and auto-approved: the caller selects checks by name and every
+    command is server-owned, so the exposure is bounded to the fixed catalog.
+
+    Args:
+        node: Name of the node to diagnose (required)
+        checks: Names of the checks to run (see NODE_CHECKS/DCGM_CHECKS)
+        dcgm_diag_level: dcgmi diag -r level, only used by the dcgm_diag check
+        pid: Host process id, required by the process_info check
+        pci_bus_id: PCI bus id (e.g. "01:00.0"), required by the pci_link check
+
+    Returns:
+        Dictionary with success status, stdout (one `===== <check> =====` section
+        per check), stderr, and the node/checks context
+    """
+    try:
+        if not GPU_DIAG_ENABLED:
+            raise ValueError(
+                "GPU node diagnostics are disabled on this server "
+                "(GPU_DIAG_ENABLED=false)."
+            )
+        _validate_identifier(node, "node")
+        checks = list(dict.fromkeys(checks))  # dedupe, keep order
+        if not checks:
+            raise ValueError(
+                f"No checks provided. Available checks: {', '.join(_gpu_check_names())}."
+            )
+        unknown = [c for c in checks if c not in NODE_CHECKS and c not in DCGM_CHECKS]
+        if unknown:
+            raise ValueError(
+                f"Unknown checks {unknown!r}. Available checks: "
+                f"{', '.join(_gpu_check_names())}."
+            )
+        dcgm_names = [c for c in checks if c in DCGM_CHECKS]
+        if dcgm_names and not DCGM_ENABLED:
+            raise ValueError(
+                f"Checks {dcgm_names!r} are disabled: the operator has turned DCGM "
+                f"checks off (DCGM_ENABLED=false). Available checks: "
+                f"{', '.join(_gpu_check_names())}."
+            )
+
+        commands: Dict[str, str] = {}
+        for name in checks:
+            command = NODE_CHECKS.get(name) or DCGM_CHECKS[name]
+            required = HOST_CHECK_REQUIRED_PARAM.get(name)
+            if required == "pid":
+                # Validated strictly because it is substituted into the (server-
+                # owned) shell command below.
+                if pid is None or not 0 < int(pid) < 2**22:
+                    raise ValueError(
+                        "The process_info check requires `pid`: a positive host "
+                        "process id (see gpu_device_holders or compute_processes)."
+                    )
+                command = command.replace("{pid}", str(int(pid)))
+            elif required == "pci_bus_id":
+                # Same: only hex digits, ':' and '.' may reach the shell string.
+                if not pci_bus_id or not _PCI_BUS_ID_RE.match(pci_bus_id):
+                    raise ValueError(
+                        "The pci_link check requires `pci_bus_id` in lspci form "
+                        "(e.g. \"01:00.0\" or \"0000:01:00.0\"); run the `pci` check "
+                        "first to find it."
+                    )
+                command = command.replace("{bus_id}", pci_bus_id)
+            elif name == "dcgm_diag":
+                if not 1 <= dcgm_diag_level <= GPU_DIAG_DCGM_MAX_DIAG_LEVEL:
+                    raise ValueError(
+                        f"dcgm_diag_level must be between 1 and "
+                        f"{GPU_DIAG_DCGM_MAX_DIAG_LEVEL} (operator-configured cap "
+                        f"GPU_DIAG_DCGM_MAX_DIAG_LEVEL; higher levels run longer and "
+                        f"level 3 stress-tests the GPU). Got: {dcgm_diag_level}."
+                    )
+                command = f"{command} {dcgm_diag_level}"
+            commands[name] = command
+    except ValueError as e:
+        logger.warning(f"run_gpu_node_diagnostics refused: {e}")
+        return {"success": False, "error": str(e)}
+
+    # ALL requested checks share ONE throwaway pod on the node; the prelude
+    # resolves the node's own nvidia-smi and dcgmi.
+    script = _build_prelude() + "\n" + _build_multi_check_script(checks, commands)
+    return _run_node_diagnostic_pod(node=node, checks=checks, argv=["sh", "-c", script])
+
+
 @mcp.tool(
     name="get_remediation_mcp_config",
     description=(
@@ -1126,6 +1643,18 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
         "file_read_denied_paths": list(FILE_READ_DENIED_PATHS),
         "allow_arbitrary_kubectl_commands": ALLOW_ARBITRARY_COMMANDS,
         "timeout_seconds": TIMEOUT,
+        "gpu_node_diagnostics": {
+            "enabled": GPU_DIAG_ENABLED,
+            "image": GPU_DIAG_POD_IMAGE,
+            "checks": sorted(NODE_CHECKS),
+            "dcgm_enabled": DCGM_ENABLED,
+            "dcgm_checks": sorted(DCGM_CHECKS),
+            "dcgm_max_diag_level": GPU_DIAG_DCGM_MAX_DIAG_LEVEL,
+            "nvidia_smi_path": GPU_DIAG_NVIDIA_SMI_PATH,
+            "dcgmi_path": GPU_DIAG_DCGMI_PATH,
+            "namespace": GPU_DIAG_NAMESPACE,
+            "timeout_seconds": GPU_DIAG_TIMEOUT,
+        },
     }
 
 
@@ -1204,6 +1733,15 @@ if __name__ == "__main__":
     logger.info(f"File-read denied paths: {FILE_READ_DENIED_PATHS}")
     logger.info(f"Allow arbitrary kubectl commands: {ALLOW_ARBITRARY_COMMANDS}")
     logger.info(f"Timeout: {TIMEOUT}s")
+    logger.info(f"GPU node diagnostics enabled: {GPU_DIAG_ENABLED}")
+    if GPU_DIAG_ENABLED:
+        logger.info(f"GPU diagnostics image: {GPU_DIAG_POD_IMAGE}")
+        logger.info(
+            f"GPU DCGM checks enabled: {DCGM_ENABLED} "
+            f"(max diag level: {GPU_DIAG_DCGM_MAX_DIAG_LEVEL})"
+        )
+        logger.info(f"GPU diagnostics namespace: {GPU_DIAG_NAMESPACE}")
+        logger.info(f"GPU diagnostics timeout: {GPU_DIAG_TIMEOUT}s")
 
     if "--transport" in sys.argv and "http" in sys.argv:
         logger.info("Starting in HTTP transport mode")
