@@ -32,7 +32,7 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 | Tool | What it does | Enforced by |
 |------|--------------|-------------|
 | `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied. |
-| `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist — only `command[0]` is checked, exactly. |
+| `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist (`command[0]`, exact) plus a per-binary argument policy: `ps` may not display process environments. |
 | `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped, not host-networked) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag) **and a target policy** — see [Diagnostic-pod target policy](#diagnostic-pod-target-policy). |
 | `run_gpu_node_diagnostics` | Run one or more **named** GPU/driver checks (single pod for all of them) on a specific node: `overview`, `details`, `throttling`, `utilization_samples`, `ecc`, `page_retirement`, `row_remapper`, `compute_processes`, `kernel_gpu_errors`, `kernel_log_journal`, `driver_info`, `pci`, `pci_link`, `fabric_manager`, `gpu_device_holders`, `process_info`, plus opt-in `dcgm_*`. The pod is pinned to the node and runs the **node's own binaries** through the host filesystem (mounted read-only at `/host`) — no custom image is involved beyond a shell (busybox); `nvidia-smi` is resolved from the host PATH or the GPU Operator's containerized-driver root. | Check-name catalog — every command string is server-owned; the caller picks only the node, check names, and strictly validated `pid`/`pci_bus_id`/`dcgm_diag_level` scalars. See [GPU node diagnostics](#gpu-node-diagnostics). |
 | `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
@@ -42,6 +42,19 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 and the in-container command are separate parameters and the server owns the
 `kubectl exec ... --` boundary, a caller cannot smuggle a second command or a
 fake separator into the invocation.
+
+The binary allowlist alone does not bound what `ps` reads: procps prints every
+process's environment (env-injected Secrets) with the BSD `e` flag, in any
+spelling (`ps auxe`, `ps -p 1 e`, `ps -o args e`), and also re-parses single-dash
+options as BSD when one of them fails to parse (`ps -uxe`, `ps -ef -jx`). The
+server therefore applies a `ps` argument policy before executing: the BSD `e`
+flag is refused, unrecognised options are refused (fail closed), and `-e` may
+not be combined with user/group/session/tty selectors whose lookup can fail
+inside the container. Plain forms such as `ps aux`, `ps -ef`,
+`ps -eo pid,user,etime,args` and `ps -p <pid> -o args` work unchanged; a refusal
+names the reason and points to `run_kubectl_command` (human approval). `ps`
+output still shows process command lines, so secrets passed as CLI arguments
+remain visible — that is an accepted residual (see the design notes).
 
 ### Approval-gated fallback (always prompts a human)
 

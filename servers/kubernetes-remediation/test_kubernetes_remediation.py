@@ -10,6 +10,10 @@ Run with:  pytest servers/kubernetes-remediation/test_kubernetes_remediation.py
 """
 
 import json
+import os
+import shutil
+import subprocess
+import uuid
 from unittest.mock import patch
 
 import pytest
@@ -236,6 +240,261 @@ def test_preapproved_exec_rejects_shell_chars_in_command():
         )
     m.assert_not_called()
     assert result["success"] is False
+
+
+# ── run_preapproved_kubectl_exec_command: per-binary argv policy (ROB-974) ────
+
+# Every spelling that makes procps print the process environment. `e` is the BSD
+# environment flag; it works bundled, standalone, after a value option, and via
+# the "bogus dash" retry (a failing single-dash token makes procps re-parse every
+# single-dash token as BSD, so `-ef -jx` and `-uxe` leak too).
+PS_ENV_LEAK_FORMS = [
+    ["ps", "auxe"],
+    ["ps", "axeww"],
+    ["ps", "e"],
+    ["ps", "ue"],
+    ["ps", "-A", "e"],
+    ["ps", "-p", "1", "e"],
+    ["ps", "-C", "app", "e"],
+    ["ps", "-o", "pid,args", "e"],
+    ["ps", "eo", "args"],
+    ["ps", "ax", "--format", "args", "e"],
+    ["ps", "--pid", "1", "e"],
+    ["ps", "-ww", "e"],
+    ["ps", "e", "1"],
+    ["ps", "-uxe"],
+    ["ps", "-auxe"],
+    ["ps", "-axe"],
+    ["ps", "-gxe"],
+    ["ps", "-sxe"],
+    ["ps", "-jxe"],
+    ["ps", "-e", "-x"],
+    ["ps", "-ef", "-jx"],
+    ["ps", "-ef", "-u", "root"],
+    ["ps", "-e", "-uroot"],
+    ["ps", "-eo", "pid,args", "--user", "root"],
+    ["ps", "-e", "-g", "1"],
+    ["ps", "-e", "-t", "pts/0"],
+]
+
+PS_SAFE_FORMS = [
+    ["ps"],
+    ["ps", "aux"],
+    ["ps", "auxww"],
+    ["ps", "ax"],
+    ["ps", "-ef"],
+    ["ps", "-e"],
+    ["ps", "-eww"],
+    ["ps", "-ely"],
+    ["ps", "-ejH"],
+    ["ps", "-eL"],
+    ["ps", "-eF"],
+    ["ps", "-eZ"],
+    ["ps", "-e", "ax"],
+    ["ps", "-eo", "pid,ppid,user,stat,%cpu,%mem,rss,etime,args"],
+    ["ps", "-eopid,etime"],
+    ["ps", "-e", "-o", "pid,etime"],
+    ["ps", "-C", "sleep", "-o", "pid,etime"],
+    ["ps", "-p", "1", "-o", "args"],
+    ["ps", "-p", "1", "-f"],
+    ["ps", "-q", "1", "-o", "args"],
+    ["ps", "opid,etime"],
+    ["ps", "o", "pid,etime"],
+    ["ps", "-ww", "-o", "pid,args", "--forest"],
+    ["ps", "--sort=-%mem", "-eo", "pid,%mem,args"],
+    ["ps", "aux", "--sort=-%mem"],
+    ["ps", "k", "-%mem", "aux"],
+    ["ps", "--pid", "1", "--format", "pid,etime"],
+    ["ps", "--ppid", "1", "-o", "pid,args"],
+    ["ps", "-A", "--forest"],
+    ["ps", "--no-headers", "-eo", "comm"],
+    ["ps", "-u", "root"],
+    ["ps", "-uroot", "-o", "pid,args"],
+    ["ps", "-U", "0", "-o", "pid,user,args"],
+    ["ps", "-G", "root"],
+    ["ps", "-t", "pts/0"],
+    ["ps", "U", "root"],
+    ["ps", "-eN", "-p", "1"],
+    ["ps", "-D", "%H:%M", "-o", "pid,lstart"],
+    ["ps", "-V"],
+    ["ps", "--version"],
+]
+
+# Option shapes the policy does not model are refused (fail closed) rather than
+# passed through to a parser we do not control.
+PS_UNRECOGNISED_FORMS = [
+    ["ps", "--environment"],
+    ["ps", "--"],
+    ["ps", "-"],
+    ["ps", "-e-"],
+    ["ps", "-x"],
+    ["ps", "-b"],
+    ["ps", "-o"],
+    ["ps", "--format"],
+    ["ps", "-p"],
+    ["ps", "1"],
+    ["ps", "-o", "args", "1"],
+    ["ps", "aux", "--format=args", "--bogus"],
+    ["ps", "a$x"],
+]
+
+
+@pytest.mark.parametrize("command", PS_ENV_LEAK_FORMS)
+def test_ps_environment_display_refused(command):
+    reason = k.preapproved_exec_argv_reason(command)
+    assert reason is not None
+    assert "run_kubectl_command" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["ps", "auxe"], ["ps", "-p", "1", "e"], ["ps", "-uxe"], ["ps", "-ef", "-u", "root"]],
+)
+def test_ps_refusal_names_the_environment_hazard(command):
+    assert "environment" in k.preapproved_exec_argv_reason(command)
+
+
+@pytest.mark.parametrize("command", PS_SAFE_FORMS)
+def test_ps_safe_forms_allowed(command):
+    assert k.preapproved_exec_argv_reason(command) is None
+
+
+@pytest.mark.parametrize("command", PS_UNRECOGNISED_FORMS)
+def test_ps_unrecognised_option_shapes_refused(command):
+    reason = k.preapproved_exec_argv_reason(command)
+    assert reason is not None
+    assert "run_kubectl_command" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["top", "-b", "-n", "1", "e"],
+        ["ls", "-e"],
+        ["df", "e"],
+        ["netstat", "-e"],
+        ["ss", "-e"],
+    ],
+)
+def test_argv_policy_only_binds_binaries_that_have_a_checker(command):
+    assert k.preapproved_exec_argv_reason(command) is None
+
+
+def test_argv_policy_ignores_empty_command():
+    assert k.preapproved_exec_argv_reason([]) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["ps", "auxe"], ["ps", "-p", "1", "e"], ["ps", "-uxe"], ["ps", "-ef", "-jx"]],
+)
+def test_preapproved_exec_refuses_ps_env_flags_without_executing(command):
+    with patch.object(k, "_run_kubectl") as m:
+        result = k.run_preapproved_kubectl_exec_command(
+            pod="victim", namespace="prod", command=command
+        )
+    m.assert_not_called()
+    assert result["success"] is False
+    assert "run_kubectl_command" in result["error"]
+
+
+def test_preapproved_exec_still_runs_safe_ps_forms():
+    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
+        k.run_preapproved_kubectl_exec_command(
+            pod="api", namespace="prod", command=["ps", "-eo", "pid,user,etime,args"]
+        )
+    m.assert_called_once_with(
+        ["exec", "api", "-n", "prod", "--", "ps", "-eo", "pid,user,etime,args"]
+    )
+
+
+def test_get_config_exposes_exec_argv_policy():
+    cfg = k.get_remediation_mcp_config()
+    assert "ps" in cfg["preapproved_exec_argv_policy"]
+
+
+def _procps_available() -> bool:
+    try:
+        out = subprocess.run(["ps", "--version"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "procps" in (out.stdout + out.stderr)
+
+
+def _real_ps_leaks_env(args, marker):
+    """Run the real ps against a child carrying `marker` in its environment."""
+    child = subprocess.Popen([shutil.which("sleep"), "30"], env={"PS_POLICY_MARKER": marker})
+    try:
+        argv = [a.replace("<PID>", str(child.pid)) for a in args]
+        # COLUMNS: ps truncates lines to the terminal width without `ww`.
+        out = subprocess.run(
+            ["ps", *argv],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": os.environ["PATH"], "COLUMNS": "4000"},
+        )
+        return marker in out.stdout
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(not _procps_available(), reason="procps ps not on PATH")
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["auxe"],
+        ["axeww"],
+        ["-A", "e"],
+        ["-p", "<PID>", "e"],
+        ["-p", "<PID>", "-o", "args", "e"],
+        ["-p", "<PID>", "eo", "args"],
+        ["--pid", "<PID>", "e"],
+        ["e", "<PID>"],
+        ["-uxe"],
+        ["-auxe"],
+        ["-axe"],
+        ["-gxe"],
+        ["-sxe"],
+        ["-e", "-x"],
+        ["-ef", "-jx"],
+    ],
+)
+def test_refused_ps_forms_really_leak_on_procps(args):
+    # Ground truth for the policy: every refused spelling discloses the environment
+    # on a real procps, and the policy refuses it.
+    marker = uuid.uuid4().hex
+    assert _real_ps_leaks_env(args, marker) is True
+    assert k.preapproved_exec_argv_reason(["ps", *args]) is not None
+
+
+@pytest.mark.skipif(not _procps_available(), reason="procps ps not on PATH")
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["aux"],
+        ["-ef"],
+        ["-e", "ax"],
+        ["-eo", "pid,ppid,user,etime,args"],
+        ["-eopid,etime,args"],
+        ["-C", "sleep", "-o", "pid,etime,args"],
+        ["-p", "<PID>", "-o", "args"],
+        ["-p", "<PID>", "-f"],
+        ["-q", "<PID>", "-o", "args"],
+        ["--pid", "<PID>", "--format", "pid,etime,args"],
+        ["aux", "--sort=-%mem"],
+        ["-ejH"],
+        ["-ely"],
+        ["-eww"],
+        ["-U", "0", "-o", "pid,user,args"],
+        ["-A", "--forest"],
+    ],
+)
+def test_allowed_ps_forms_do_not_leak_on_procps(args):
+    marker = uuid.uuid4().hex
+    assert k.preapproved_exec_argv_reason(["ps", *args]) is None
+    assert _real_ps_leaks_env(args, marker) is False
 
 
 # ── run_preapproved_diagnostic_image ─────────────────────────────────────────────────────
@@ -770,6 +1029,7 @@ def test_get_config_returns_effective_policy():
         "allowed_commands",
         "dangerous_flags",
         "preapproved_exec_binaries",
+        "preapproved_exec_argv_policy",
         "diagnostic_images",
         "diagnostic_target_policy_enabled",
         "diagnostic_allow_external_targets",

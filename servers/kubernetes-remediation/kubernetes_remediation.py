@@ -13,7 +13,9 @@ is encoded in the tool set, never guessed per-command:
 
   Auto-approved (read-only / data-gathering, never prompt):
     - read_file_from_container          (path allow/deny policy)
-    - run_preapproved_kubectl_exec_command  (read-only in-container binary allowlist)
+    - run_preapproved_kubectl_exec_command  (read-only in-container binary allowlist
+                                         + per-binary argument policy: `ps` may
+                                         not display process environments)
     - run_preapproved_diagnostic_image      (troubleshooting image allowlist)
     - run_gpu_node_diagnostics          (named GPU/driver checks via a node-pinned
                                          privileged pod that runs the NODE'S OWN
@@ -110,7 +112,9 @@ DANGEROUS_FLAGS = set(
 # server builds `kubectl exec <pod> -n <ns> [-c <container>] -- <binary> [args]`
 # itself, so only the bare binary name is configured — no patterns, no wildcards.
 # Deliberately excludes `cat` (use read_file_from_container) and `env` (leaks
-# secrets).
+# secrets). Binaries with options that widen what they read get a per-binary
+# argument checker (see _PREAPPROVED_EXEC_ARGV_CHECKERS): `ps` must not print
+# process environments.
 PREAPPROVED_EXEC_BINARIES = set(
     _split_csv(
         os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss")
@@ -1102,6 +1106,156 @@ def is_preapproved_exec_command(command: List[str]) -> bool:
     return bool(command) and command[0] in PREAPPROVED_EXEC_BINARIES
 
 
+# ── Per-binary argument policy for run_preapproved_kubectl_exec_command ───────
+#
+# The binary allowlist bounds WHICH program runs, not what its options make it
+# read. procps `ps` prints every process's environment (env-injected Secrets)
+# when the BSD `e` flag is present — bundled (`auxe`), standalone (`-p 1 e`),
+# after a value option (`-o args e`) — and also through its "bogus dash" retry:
+# when a single-dash token fails to parse and no bare word is present, procps
+# re-parses EVERY single-dash token as BSD, so `-uxe`, `-ef -jx` and `-e -x`
+# leak too (ROB-974). Each binary that needs one gets a checker taking argv
+# without argv[0] and returning a refusal reason, else None. Option shapes the
+# checker does not model are refused (fail closed); the approval-gated
+# run_kubectl_command remains available for them.
+
+# procps ps grammar (ps(1)): single-dash UNIX options, clustered; dash-less BSD
+# options, clustered; `--` GNU long options. A value-taking option consumes the
+# rest of its token if non-empty, else the next token.
+_PS_UNIX_FLAGS = frozenset("AacdefFHjlLmMNTVwyZ")
+_PS_UNIX_VALUE_OPTS = frozenset("CDGgOopqstUu")
+# Selectors whose value is resolved against the container at parse time. If the
+# lookup misses, the retry above turns a UNIX `-e` (all processes) into the BSD
+# environment flag — so they are refused whenever a single-dash token holds `e`.
+_PS_UNIX_LOOKUP_OPTS = frozenset("DGgstUu")
+_PS_BSD_FLAGS = frozenset("acfghHjLlmnrsSTuVvwXxZ")  # `e` deliberately absent
+_PS_BSD_VALUE_OPTS = frozenset("kOopqtU")
+_PS_BSD_ENV_FLAG = "e"
+_PS_LONG_FLAGS = frozenset(
+    {
+        "--context",
+        "--cumulative",
+        "--deselect",
+        "--forest",
+        "--headers",
+        "--help",
+        "--info",
+        "--no-headers",
+        "--signames",
+        "--version",
+    }
+)
+_PS_LONG_VALUE_OPTS = frozenset(
+    {
+        "--cols",
+        "--columns",
+        "--date-format",
+        "--format",
+        "--group",
+        "--Group",
+        "--lines",
+        "--pid",
+        "--ppid",
+        "--quick-pid",
+        "--rows",
+        "--sid",
+        "--sort",
+        "--tty",
+        "--user",
+        "--User",
+        "--width",
+    }
+)
+_PS_LONG_LOOKUP_OPTS = frozenset(
+    {"--date-format", "--group", "--Group", "--sid", "--tty", "--user", "--User"}
+)
+
+_PS_SAFE_EXAMPLES = (
+    "e.g. `ps aux`, `ps -ef`, `ps -eo pid,user,etime,args`, `ps -p <pid> -o args`"
+)
+_PS_FALLBACK = "or use run_kubectl_command (requires human approval)"
+
+
+def _ps_argv_reason(args: List[str]) -> Optional[str]:
+    """Refusal reason for a `ps` argv (without `ps` itself), else None."""
+    unix_e = False
+    lookup = False
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if tok.startswith("--"):
+            name, sep, _ = tok.partition("=")
+            if name in _PS_LONG_VALUE_OPTS:
+                lookup = lookup or name in _PS_LONG_LOOKUP_OPTS
+                if not sep:
+                    if i >= len(args):
+                        return f"'ps' option {tok!r} requires a value; {_PS_FALLBACK}."
+                    i += 1
+                continue
+            if name in _PS_LONG_FLAGS and not sep:
+                continue
+            return (
+                f"'ps' option {tok!r} is not recognised by the exec argument policy; "
+                f"use standard options ({_PS_SAFE_EXAMPLES}) {_PS_FALLBACK}."
+            )
+        is_unix = tok.startswith("-")
+        if is_unix:
+            letters, flags, value_opts = tok[1:], _PS_UNIX_FLAGS, _PS_UNIX_VALUE_OPTS
+        else:
+            letters, flags, value_opts = tok, _PS_BSD_FLAGS, _PS_BSD_VALUE_OPTS
+        if not letters:
+            return f"'ps' argument {tok!r} is not recognised; {_PS_FALLBACK}."
+        # Any `e` in a single-dash token (flag or attached value, e.g. `-uxe`)
+        # becomes the BSD environment flag if procps retries the argv as BSD.
+        unix_e = unix_e or (is_unix and _PS_BSD_ENV_FLAG in letters)
+        for pos, ch in enumerate(letters):
+            if not is_unix and ch == _PS_BSD_ENV_FLAG:
+                return (
+                    f"'ps' option {tok!r} includes the BSD 'e' flag, which prints every "
+                    f"process's environment and can disclose credentials; use "
+                    f"{_PS_SAFE_EXAMPLES} instead, {_PS_FALLBACK}."
+                )
+            if ch in value_opts:
+                lookup = lookup or (is_unix and ch in _PS_UNIX_LOOKUP_OPTS)
+                if pos == len(letters) - 1:
+                    if i >= len(args):
+                        return f"'ps' option {tok!r} requires a value; {_PS_FALLBACK}."
+                    i += 1
+                break
+            if ch not in flags:
+                return (
+                    f"'ps' option {tok!r} is not recognised by the exec argument policy; "
+                    f"use standard options ({_PS_SAFE_EXAMPLES}) {_PS_FALLBACK}."
+                )
+    if unix_e and lookup:
+        return (
+            "'ps' with a user/group/session/tty selector and the letter 'e' in a "
+            "single-dash option (e.g. `-e -u root`, `-uxe`) is refused: if the lookup "
+            "fails inside the container, procps re-parses the option as the BSD "
+            "environment flag and prints every process's environment. Select with "
+            f"-p/-C/--pid or drop -e (e.g. `ps aux`, `ps -o pid,user,args -u <user>`), "
+            f"{_PS_FALLBACK}."
+        )
+    return None
+
+
+_PREAPPROVED_EXEC_ARGV_CHECKERS = {"ps": _ps_argv_reason}
+
+PREAPPROVED_EXEC_ARGV_POLICY = {
+    "ps": "BSD 'e' (environment display) refused in every spelling; unrecognised "
+    "options refused; -e with user/group/session/tty selectors refused",
+}
+
+
+def preapproved_exec_argv_reason(command: List[str]) -> Optional[str]:
+    """Reason the in-container argv must be refused despite an allowlisted binary, else None."""
+    if not command:
+        return None
+    checker = _PREAPPROVED_EXEC_ARGV_CHECKERS.get(command[0])
+    return checker(command[1:]) if checker else None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Auto-approved tools
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1179,9 +1333,12 @@ def read_file_from_container(
         "via `kubectl exec` (e.g. ps/top/df/ls/netstat/ss). Pass the pod, "
         "namespace, optional container, and the in-container command as a list; "
         "the server builds the `kubectl exec ... -- <command>` invocation itself.\n\n"
-        "Only the command's binary (command[0]) needs to be on the allowlist; if "
-        "it isn't you get a structured refusal telling you to use "
-        "run_kubectl_command (which requires human approval). To read a file use "
+        "The command's binary (command[0]) must be on the allowlist; if it isn't "
+        "you get a structured refusal telling you to use run_kubectl_command "
+        "(which requires human approval). `ps` additionally may not display "
+        "process environments: the BSD `e` flag (`ps auxe`, `ps -p 1 e`) and "
+        "`-e` combined with a user/group/tty selector are refused — use "
+        "`ps aux`, `ps -ef` or `ps -eo pid,user,etime,args`. To read a file use "
         "read_file_from_container instead of `cat`.\n\n"
         "Example: run_preapproved_kubectl_exec_command(pod=\"api-xxx\", namespace=\"prod\", command=[\"ps\",\"aux\"])"
     ),
@@ -1225,6 +1382,9 @@ def run_preapproved_kubectl_exec_command(
                 f"Allowed binaries: {', '.join(sorted(PREAPPROVED_EXEC_BINARIES))}. "
                 f"Use run_kubectl_command (requires human approval) for anything else."
             )
+        argv_reason = preapproved_exec_argv_reason(command)
+        if argv_reason:
+            raise ValueError(argv_reason)
     except ValueError as e:
         logger.warning(f"run_preapproved_kubectl_exec_command refused: {e}")
         return {"success": False, "error": str(e)}
@@ -1633,6 +1793,7 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
         "allowed_commands": sorted(ALLOWED_COMMANDS),
         "dangerous_flags": sorted(DANGEROUS_FLAGS),
         "preapproved_exec_binaries": sorted(PREAPPROVED_EXEC_BINARIES),
+        "preapproved_exec_argv_policy": dict(PREAPPROVED_EXEC_ARGV_POLICY),
         "diagnostic_images": list(DIAGNOSTIC_IMAGES),
         "diagnostic_target_policy_enabled": DIAGNOSTIC_TARGET_POLICY_ENABLED,
         "diagnostic_allow_external_targets": ALLOW_EXTERNAL_DIAGNOSTIC_TARGETS,
