@@ -31,7 +31,7 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 
 | Tool | What it does | Enforced by |
 |------|--------------|-------------|
-| `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied. |
+| `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts, credential directories/files and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied; a path that cannot be canonicalized is refused. See [File-read path policy](#file-read-path-policy). |
 | `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist — only `command[0]` is checked, exactly. |
 | `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped, not host-networked) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag) **and a target policy** — see [Diagnostic-pod target policy](#diagnostic-pod-target-policy). |
 | `run_gpu_node_diagnostics` | Run one or more **named** GPU/driver checks (single pod for all of them) on a specific node: `overview`, `details`, `throttling`, `utilization_samples`, `ecc`, `page_retirement`, `row_remapper`, `compute_processes`, `kernel_gpu_errors`, `kernel_log_journal`, `driver_info`, `pci`, `pci_link`, `fabric_manager`, `gpu_device_holders`, `process_info`, plus opt-in `dcgm_*`. The pod is pinned to the node and runs the **node's own binaries** through the host filesystem (mounted read-only at `/host`) — no custom image is involved beyond a shell (busybox); `nvidia-smi` is resolved from the host PATH or the GPU Operator's containerized-driver root. | Check-name catalog — every command string is server-owned; the caller picks only the node, check names, and strictly validated `pid`/`pci_bus_id`/`dcgm_diag_level` scalars. See [GPU node diagnostics](#gpu-node-diagnostics). |
@@ -62,7 +62,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 
 | Tool | Mutating | Approval | Enforced where |
 |------|----------|----------|----------------|
-| `read_file_from_container` | No | Auto | server path policy |
+| `read_file_from_container` | No | Auto | server path policy ([details](#file-read-path-policy)) |
 | `run_preapproved_kubectl_exec_command` | No | Auto | server binary allowlist |
 | `run_preapproved_diagnostic_image` | No (data-gathering pod) | Auto | server image allowlist + target policy + egress NetworkPolicy |
 | `run_gpu_node_diagnostics` | No (data-gathering pod, no host access) | Auto | server check catalog (server-owned commands) |
@@ -80,8 +80,9 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED` | `true` | master switch for the diagnostic target policy; `false` disables **all** target checks (see warning below) |
 | `KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS` | `false` | allow diagnostic probes to target hosts outside the cluster |
 | `KUBECTL_DIAGNOSTIC_INTERNAL_DNS_SUFFIXES` | `.svc,.svc.cluster.local,.cluster.local` | DNS suffixes counted as cluster-internal |
-| `KUBECTL_FILE_READ_ALLOWED_PATHS` | `/` | `read_file_from_container` allow roots |
-| `KUBECTL_FILE_READ_DENIED_PATHS` | `/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/` | secret-mount denylist |
+| `KUBECTL_FILE_READ_ALLOWED_PATHS` | `/app,/config,/data,/etc,/home,/opt,/srv,/tmp,/usr,/var/lib,/var/log,/var/tmp,/var/www,/workspace` | `read_file_from_container` allow roots (explicit; `/` is accepted but logs a warning) |
+| `KUBECTL_FILE_READ_DENIED_PATHS` | `/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/` | operator denylist, applied on top of the built-in hard-denied roots/patterns |
+| `KUBECTL_FILE_READ_REQUIRE_CANONICALIZATION` | `true` | refuse a read when the path cannot be resolved with `readlink -f` inside the container; `false` restores the pre-1.4.0 fail-open |
 | `KUBECTL_ALLOW_ARBITRARY_COMMANDS` | `true` | enable the approval-gated fallback |
 | `KUBECTL_TIMEOUT` | `60` | per-command timeout (s) |
 | `LOG_LEVEL` | `INFO` | logging |
@@ -97,6 +98,45 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 The diagnostic image allowlist matches on the **repository**; the server runs the
 pinned tag from the allowlist, so callers can just name the repo
 (`run_preapproved_diagnostic_image(image="nicolaka/netshoot", ...)`).
+
+## File-read path policy
+
+`read_file_from_container` is auto-approved and runs with cluster-wide
+`pods/exec`, so the path policy is the only thing standing between a
+prompt-injected investigation and every file in every container (ROB-973).
+The policy is applied in this order, and denial always wins:
+
+1. **Hard-denied roots** (not configurable): `/proc`, `/sys`, `/dev`,
+   `/var/run/secrets`, `/run/secrets`, `/var/secrets`, `/etc/secrets`,
+   `/secrets`, `/vault/secrets`, `/etc/kubernetes/pki`, `/etc/ssl/private`,
+   `/etc/shadow`, `/etc/gshadow` (and their `-` backups).
+2. **Hard-denied credential patterns** (not configurable), matched
+   case-insensitively against path segments at any depth: `.aws`, `.azure`,
+   `.config/gcloud`, `.kube`, `.ssh`, `.docker`, `.gnupg`, `.oci`, `.boto`,
+   `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.pgpass`, `.my.cnf`,
+   `.terraformrc`, `.terraform.d/credentials*`, `.vault-token`, `.env`,
+   `.env.*`, `*credentials*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,
+   `*.keystore`, `*.kubeconfig`, `kubeconfig`, `id_rsa*`, `id_dsa*`,
+   `id_ecdsa*`, `id_ed25519*`. Public CA bundles named `*.pem` are a known
+   false positive — use `run_kubectl_command` (approval) for those.
+3. **Operator denylist** (`KUBECTL_FILE_READ_DENIED_PATHS`).
+4. **Allow roots** (`KUBECTL_FILE_READ_ALLOWED_PATHS`): the path must be under
+   one of them. The default is an explicit list of application/config/log
+   locations; `/root`, `/mnt`, `/run` and the binary directories are not in
+   it. Widen per environment as needed.
+
+The literal path is checked first (a literally-denied path never reaches the
+cluster). The path is then resolved **inside the container** with
+`readlink -f`, the canonical target is checked against the same rules, and
+`cat` runs on the canonical target — so a symlink swapped between the two
+calls cannot redirect the read. If resolution fails (the image has no
+`readlink`, the exec fails, the output is empty or relative) the read is
+**refused** with the underlying error; the approval-gated `run_kubectl_command`
+remains available for such images. `KUBECTL_FILE_READ_REQUIRE_CANONICALIZATION=false`
+restores the previous fail-open behaviour and logs a warning at startup.
+
+`get_remediation_mcp_config` reports the effective allow roots, operator
+denylist, hard-denied roots/patterns and the canonicalization mode.
 
 ## GPU node diagnostics
 
