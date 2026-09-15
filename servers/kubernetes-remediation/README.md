@@ -52,7 +52,18 @@ fake separator into the invocation.
 Server guards on `run_kubectl_command` (defense in depth, independent of approval):
 
 - **Hard verb allowlist** (`KUBECTL_ALLOWED_COMMANDS`).
-- **Flag blocklist** (`KUBECTL_DANGEROUS_FLAGS`) + `--overrides`.
+- **Flag blocklist**: a built-in, non-removable set covering every kubectl
+  connection, TLS, credential, identity and context override in every spelling
+  (`--server`/`-s`, `--proxy-url`, `--insecure-skip-tls-verify`,
+  `--certificate-authority`, `--tls-server-name`, `--token`,
+  `--client-certificate`/`--client-key`, `--username`/`--password`,
+  `--as`/`--as-group`/`--as-uid`/`--as-user-extra`, `--kubeconfig`, `--context`,
+  `--cluster`, `--user`, `--kuberc`, `--overrides`, `--profile`,
+  `--profile-output`, `--cache-dir`), plus anything in `KUBECTL_DANGEROUS_FLAGS`
+  (additive). Matching is pflag-aware: `--flag=value`, `--flag value`, glued
+  short values (`-shttps://…`) and boolean clusters (`-is https://…`) are all
+  recognised. Flags after a bare `--` belong to the in-container command and are
+  not kubectl flags.
 - **Shell-metacharacter rejection** (`; | & $ \` \ ' " ` and newlines); `shell=False`.
 - **Timeout** (`KUBECTL_TIMEOUT`).
 - **`KUBECTL_ALLOW_ARBITRARY_COMMANDS`**: when `false`, this tool is disabled —
@@ -74,7 +85,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `KUBECTL_ALLOWED_COMMANDS` | `edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec` | Hard verb allowlist for `run_kubectl_command` |
-| `KUBECTL_DANGEROUS_FLAGS` | `--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid` | Blocked flags |
+| `KUBECTL_DANGEROUS_FLAGS` | *(empty)* | **Additional** blocked flags for `run_kubectl_command`, on top of the built-in non-removable set (server/proxy, TLS, credentials, impersonation, kubeconfig/context/kuberc, `--overrides`, profiling/cache paths) |
 | `KUBECTL_PREAPPROVED_EXEC_BINARIES` | `ps,top,df,ls,netstat,ss` | `run_preapproved_kubectl_exec_command` binary allowlist (bare names, no patterns) |
 | `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_preapproved_diagnostic_image` allowlist |
 | `KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED` | `true` | master switch for the diagnostic target policy; `false` disables **all** target checks (see warning below) |
@@ -227,7 +238,7 @@ shell-metacharacter rejection, and the flag-injection check still apply.
 
 ```bash
 # 1. Build the Docker image
-docker build -t kubernetes-remediation-mcp:1.2.0 .
+docker build -t kubernetes-remediation-mcp:1.3.1 .
 
 # 2. Deploy the scoped RBAC (ServiceAccount + ClusterRole + binding, no cluster-admin)
 kubectl apply -f rbac.yaml
