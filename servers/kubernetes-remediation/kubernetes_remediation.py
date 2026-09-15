@@ -744,12 +744,13 @@ def _flag_names(arg: str) -> List[str]:
       '-shttps://x'         -> ['-s']            (glued short value)
       '-is'                 -> ['-i', '-s']      (boolean cluster + value flag)
       '-lapp=x'             -> ['-l']            (-l takes the rest as value)
+      '--proxy_url=http://x' -> ['--proxy-url']   (kubectl normalizes _ to -)
       'pod', '-', '--'      -> []
     """
     if len(arg) < 2 or not arg.startswith("-") or arg == "--":
         return []
     if arg.startswith("--"):
-        return [arg.split("=", 1)[0]]
+        return [arg.split("=", 1)[0].replace("_", "-")]
     cluster = arg.split("=", 1)[0][1:]
     names: List[str] = []
     for ch in cluster:

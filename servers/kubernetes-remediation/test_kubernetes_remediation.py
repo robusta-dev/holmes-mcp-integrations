@@ -771,6 +771,15 @@ def test_kubectl_command_rejects_dangerous_flags():
         ["delete", "pod", "x", "--as-group=system:masters"],
         ["delete", "pod", "x", "--as-uid=1"],
         ["run", "x", "--image=busybox", "--overrides={}"],
+        # kubectl's WordSepNormalizeFunc accepts '_' for '-' in flag names
+        ["delete", "pod", "x", "--proxy_url=http://evil"],
+        ["delete", "pod", "x", "--insecure_skip_tls_verify"],
+        ["delete", "pod", "x", "--certificate_authority=/x"],
+        ["delete", "pod", "x", "--tls_server_name=evil"],
+        ["delete", "pod", "x", "--client_certificate=/x", "--client_key=/y"],
+        ["delete", "pod", "x", "--as_group=system:masters"],
+        ["delete", "pod", "x", "--as_user_extra=k=v"],
+        ["delete", "pod", "x", "--cache_dir=/x"],
     ],
 )
 def test_kubectl_command_rejects_connection_and_identity_overrides(args):
@@ -839,6 +848,8 @@ def test_kubectl_command_dangerous_flag_before_verb_is_rejected_as_verb():
         ("-", []),
         ("--", []),
         ("-1", ["-1"]),
+        ("--proxy_url=http://x", ["--proxy-url"]),
+        ("--insecure_skip_tls_verify", ["--insecure-skip-tls-verify"]),
     ],
 )
 def test_flag_names_normalization(arg, names):
