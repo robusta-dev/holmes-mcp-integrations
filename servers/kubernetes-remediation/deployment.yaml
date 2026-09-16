@@ -17,7 +17,7 @@ spec:
       serviceAccountName: kubernetes-remediation-mcp-sa
       containers:
       - name: mcp-server
-        image: me-west1-docker.pkg.dev/robusta-development/development/kubernetes-remediation:1.2.0
+        image: me-west1-docker.pkg.dev/robusta-development/development/kubernetes-remediation:1.4.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
@@ -28,9 +28,12 @@ spec:
         - name: KUBECTL_ALLOWED_COMMANDS
           value: "edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec"
 
-        # Dangerous flags that are always blocked
+        # ADDITIONAL flags to block on run_kubectl_command. The server always
+        # blocks its built-in set (--server/-s, --proxy-url, TLS trust, client
+        # credentials, impersonation, kubeconfig/context/kuberc, --overrides,
+        # profiling/cache paths) and this list can only widen it, never shrink it.
         - name: KUBECTL_DANGEROUS_FLAGS
-          value: "--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid"
+          value: ""
 
         # Pre-approved read-only in-container binaries for
         # run_preapproved_kubectl_exec_command (auto-approved)
@@ -61,11 +64,18 @@ spec:
         - name: KUBECTL_DIAGNOSTIC_INTERNAL_DNS_SUFFIXES
           value: ".svc,.svc.cluster.local,.cluster.local"
 
-        # read_file_from_container path policy (allow roots minus secret/token mounts)
+        # read_file_from_container path policy. Allow roots are explicit
+        # application/config/log locations, never "/" (ROB-973). Secret mounts,
+        # credential directories/files and /proc,/sys,/dev are denied
+        # unconditionally on top of this list and are not configurable.
         - name: KUBECTL_FILE_READ_ALLOWED_PATHS
-          value: "/"
+          value: "/app,/config,/data,/etc,/home,/opt,/srv,/tmp,/usr,/var/lib,/var/log,/var/tmp,/var/www,/workspace"
         - name: KUBECTL_FILE_READ_DENIED_PATHS
           value: "/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/"
+        # Refuse reads whose path cannot be canonicalized inside the container
+        # (image without `readlink`). "false" restores the pre-1.4.0 fail-open.
+        - name: KUBECTL_FILE_READ_REQUIRE_CANONICALIZATION
+          value: "true"
 
         # ---- GPU node diagnostics (opt-in) ----
         # run_gpu_node_diagnostics runs the NODE'S OWN binaries (nvidia-smi,

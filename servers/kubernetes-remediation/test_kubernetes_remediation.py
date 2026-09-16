@@ -9,12 +9,13 @@ PATH or not.
 Run with:  pytest servers/kubernetes-remediation/test_kubernetes_remediation.py
 """
 
+import asyncio
 import json
 import os
 import shutil
 import subprocess
 import uuid
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -78,7 +79,7 @@ def test_read_path_denied_wins_when_under_allowed():
 
 
 def test_read_file_invokes_cat_with_validated_path():
-    with patch.object(k, "_resolve_symlink_in_container", return_value=None), \
+    with patch.object(k, "_resolve_symlink_in_container", return_value="/app/config.yaml"), \
          patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
         k.read_file_from_container(namespace="prod", pod="api-1", path="/app/config.yaml")
     m.assert_called_once_with(
@@ -87,11 +88,12 @@ def test_read_file_invokes_cat_with_validated_path():
 
 
 def test_read_file_with_container():
-    with patch.object(k, "_resolve_symlink_in_container", return_value=None), \
+    with patch.object(k, "_resolve_symlink_in_container", return_value="/etc/hosts") as r, \
          patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
         k.read_file_from_container(
             namespace="prod", pod="api-1", container="sidecar", path="/etc/hosts"
         )
+    r.assert_called_once_with("prod", "api-1", "sidecar", "/etc/hosts")
     m.assert_called_once_with(
         ["exec", "api-1", "-n", "prod", "-c", "sidecar", "--", "cat", "/etc/hosts"]
     )
@@ -128,21 +130,314 @@ def test_read_file_refuses_when_symlink_resolves_into_denied_path():
     assert "symlink" in result["error"].lower() or "restricted" in result["error"]
 
 
-def test_read_file_reads_when_symlink_resolves_into_allowed_path():
+def test_read_file_reads_canonical_target_when_symlink_resolves_into_allowed_path():
     with patch.object(
         k, "_resolve_symlink_in_container", return_value="/data/real-config.yaml"
     ), patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
         k.read_file_from_container(namespace="prod", pod="api", path="/app/config.yaml")
-    m.assert_called_once()  # canonical target allowed -> cat runs on the literal path
+    # cat runs on the canonical target, not the literal symlink, so a swap
+    # between readlink and cat cannot redirect the read.
+    m.assert_called_once_with(
+        ["exec", "api", "-n", "prod", "--", "cat", "/data/real-config.yaml"]
+    )
 
 
 def test_read_file_denied_path_does_not_execute():
-    with patch.object(k, "_run_kubectl") as m:
+    with patch.object(k, "_run_kubectl") as m, \
+         patch.object(k.subprocess, "run") as sub:
         result = k.read_file_from_container(
             namespace="prod", pod="api-1", path="/var/run/secrets/token"
         )
     m.assert_not_called()
+    sub.assert_not_called()  # not even readlink runs for a literally-denied path
     assert result["success"] is False
+
+
+# ── ROB-973: hard-denied credential roots and patterns ───────────────────────
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/var/secrets/gcp/key.json",  # gcp-mcp entrypoint.sh mount
+        "/var/secrets/gcp/..2026_09_15_09_49_55.1085464222/key.json",  # secret atomic-writer dir
+        "/etc/secrets/db.yaml",
+        "/secrets/api-key",
+        "/vault/secrets/token",
+        "/run/secrets/anything",
+        "/etc/kubernetes/pki/ca.key",
+        "/etc/ssl/private/server.pem",
+        "/etc/shadow",
+        "/etc/shadow-",
+        "/etc/gshadow",
+    ],
+)
+def test_read_path_hard_denies_credential_roots_even_with_root_allowed(path):
+    with patch.object(k, "FILE_READ_ALLOWED_PATHS", ["/"]), \
+         patch.object(k, "FILE_READ_DENIED_PATHS", []):
+        with pytest.raises(ValueError) as exc:
+            k.validate_read_path(path)
+    assert "restricted" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "path, rule",
+    [
+        ("/root/.aws/credentials", ".aws"),  # aws-multi-account aws_auth.py writes here
+        ("/home/app/.aws/config", ".aws"),
+        ("/root/.config/gcloud/application_default_credentials.json", ".config/gcloud"),
+        ("/home/x/.azure/accessTokens.json", ".azure"),
+        ("/root/.kube/config", ".kube"),
+        ("/home/x/.ssh/id_rsa", ".ssh"),
+        ("/opt/keys/id_ed25519", "id_ed25519*"),
+        ("/home/x/.docker/config.json", ".docker"),
+        ("/root/.netrc", ".netrc"),
+        ("/root/.git-credentials", ".git-credentials"),
+        ("/home/x/.npmrc", ".npmrc"),
+        ("/home/x/.pgpass", ".pgpass"),
+        ("/home/x/.terraform.d/credentials.tfrc.json", ".terraform.d/credentials*"),
+        ("/home/x/.vault-token", ".vault-token"),
+        ("/app/.env", ".env"),
+        ("/app/.env.production", ".env.*"),
+        ("/APP/.ENV", ".env"),  # case-insensitive
+        ("/app/credentials.json", "*credentials*"),
+        ("/app/conf/aws_credentials", "*credentials*"),
+        ("/etc/app/server.key", "*.key"),
+        ("/etc/app/tls.pem", "*.pem"),
+        ("/opt/app/client.p12", "*.p12"),
+        ("/opt/app/client.pfx", "*.pfx"),
+        ("/opt/app/keystore.jks", "*.jks"),
+        ("/opt/app/server.keystore", "*.keystore"),
+        ("/app/kubeconfig", "kubeconfig"),
+        ("/app/prod.kubeconfig", "*.kubeconfig"),
+    ],
+)
+def test_read_path_hard_denies_credential_patterns(path, rule):
+    with patch.object(k, "FILE_READ_ALLOWED_PATHS", ["/"]), \
+         patch.object(k, "FILE_READ_DENIED_PATHS", []):
+        with pytest.raises(ValueError) as exc:
+            k.validate_read_path(path)
+    assert f"pattern '{rule}'" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/app/config.yaml",
+        "/app/environment.yaml",  # not ".env"
+        "/app/.envrc",  # neither ".env" nor ".env.*"
+        "/app/keys.txt",  # not "*.key"
+        "/app/credential-report.txt",  # singular, not "*credentials*"
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/app/.config/app/settings.json",  # ".config" alone is fine, only ".config/gcloud" is denied
+        "/app/awsome/file",  # ".aws" is an exact segment match
+        "/usr/share/nginx/html/index.html",
+        "/var/log/app.log",
+        "/home/app/service/settings.py",
+    ],
+)
+def test_read_path_patterns_do_not_overmatch(path):
+    assert k.validate_read_path(path) == path
+
+
+def test_hard_denied_pattern_matcher_reports_first_matching_rule():
+    assert k._matching_hard_denied_pattern("/root/.aws/credentials") == ".aws"
+    assert k._matching_hard_denied_pattern("/a/b/c") is None
+    assert k._matching_hard_denied_pattern("/") is None
+
+
+# ── ROB-973: default allow roots are explicit, not "/" ────────────────────────
+
+def test_default_allow_roots_exclude_root():
+    assert "/" not in k.FILE_READ_ALLOWED_PATHS
+    assert "/" not in k._split_csv(k.FILE_READ_DEFAULT_ALLOWED_PATHS)
+    for root in ("/app", "/etc", "/var/log", "/home", "/opt", "/usr"):
+        assert root in k.FILE_READ_ALLOWED_PATHS
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/root/notes.txt", "/mnt/data/dump.sql", "/bin/sh", "/run/nginx.pid", "/certs/x"],
+)
+def test_read_path_outside_default_allow_roots_is_refused(path):
+    with pytest.raises(ValueError) as exc:
+        k.validate_read_path(path)
+    assert "not under any allowed root" in str(exc.value)
+    assert "/app" in str(exc.value)
+
+
+def test_operator_deny_list_applies_after_hard_rules():
+    with patch.object(k, "FILE_READ_DENIED_PATHS", ["/app/private"]):
+        with pytest.raises(ValueError) as exc:
+            k.validate_read_path("/app/private/settings.yaml")
+        assert "denied path '/app/private'" in str(exc.value)
+        assert k.validate_read_path("/app/public/settings.yaml") == "/app/public/settings.yaml"
+
+
+def test_operator_can_widen_allow_roots_but_hard_deny_still_wins():
+    with patch.object(k, "FILE_READ_ALLOWED_PATHS", ["/"]):
+        assert k.validate_read_path("/root/notes.txt") == "/root/notes.txt"
+        with pytest.raises(ValueError):
+            k.validate_read_path("/root/.aws/credentials")
+        with pytest.raises(ValueError):
+            k.validate_read_path("/var/secrets/gcp/key.json")
+
+
+def test_empty_allow_roots_env_falls_back_to_defaults():
+    assert k._split_csv("") == []
+    assert (k._split_csv("") or k._split_csv(k.FILE_READ_DEFAULT_ALLOWED_PATHS)) == \
+        k._split_csv(k.FILE_READ_DEFAULT_ALLOWED_PATHS)
+
+
+# ── ROB-973: canonicalization fails closed ───────────────────────────────────
+
+def _completed(argv, rc, out="", err=""):
+    return subprocess.CompletedProcess(argv, rc, stdout=out, stderr=err)
+
+
+def test_resolve_symlink_returns_normalized_canonical_path():
+    with patch.object(
+        k.subprocess, "run",
+        side_effect=lambda argv, **kw: _completed(argv, 0, out="/app//real/./config.yaml\n"),
+    ) as sub:
+        assert k._resolve_symlink_in_container("prod", "api", None, "/app/link") == \
+            "/app/real/config.yaml"
+    assert sub.call_args.args[0] == \
+        ["kubectl", "exec", "api", "-n", "prod", "--", "readlink", "-f", "/app/link"]
+    assert sub.call_args.kwargs["shell"] is False
+
+
+def test_resolve_symlink_passes_container_flag():
+    with patch.object(
+        k.subprocess, "run", side_effect=lambda argv, **kw: _completed(argv, 0, out="/x\n")
+    ) as sub:
+        k._resolve_symlink_in_container("prod", "api", "sidecar", "/x")
+    assert sub.call_args.args[0][:7] == ["kubectl", "exec", "api", "-n", "prod", "-c", "sidecar"]
+
+
+def test_resolve_symlink_keeps_secret_atomic_writer_dirs_intact():
+    # Kubernetes secret mounts resolve into "..<timestamp>" directories; they
+    # are not traversal and must survive normalization so the deny check sees them.
+    canonical = "/var/secrets/gcp/..2026_09_15_09_49_55.1085464222/key.json"
+    with patch.object(
+        k.subprocess, "run", side_effect=lambda argv, **kw: _completed(argv, 0, out=canonical)
+    ):
+        assert k._resolve_symlink_in_container("prod", "api", None, "/app/gcp-key-link") == canonical
+
+
+@pytest.mark.parametrize(
+    "run_effect, expected_fragment",
+    [
+        (lambda argv, **kw: _completed(argv, 127, err='exec: "readlink": executable file not found in $PATH'),
+         "executable file not found"),
+        (lambda argv, **kw: _completed(argv, 1, err="readlink: /app/missing: No such file or directory"),
+         "exited 1"),
+        (lambda argv, **kw: _completed(argv, 0, out=""), "unusable path"),
+        (lambda argv, **kw: _completed(argv, 0, out="relative/path\n"), "unusable path"),
+        (lambda argv, **kw: _completed(argv, 0, out="/a\n/b\n"), "unusable path"),
+        (lambda argv, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired("kubectl", 60)),
+         "timed out"),
+        (lambda argv, **kw: (_ for _ in ()).throw(FileNotFoundError("kubectl")),
+         "could not be executed"),
+    ],
+)
+def test_resolve_symlink_raises_on_every_failure_mode(run_effect, expected_fragment):
+    with patch.object(k.subprocess, "run", side_effect=run_effect):
+        with pytest.raises(k.CanonicalizationError) as exc:
+            k._resolve_symlink_in_container("prod", "api", None, "/app/link")
+    assert expected_fragment in str(exc.value)
+
+
+def test_read_file_refuses_when_container_has_no_readlink():
+    # The ROB-973 fail-open: a symlink under an allowed root in an image
+    # without `readlink` used to fall back to the literal check and cat the target.
+    def fake_run(argv, **kw):
+        if "readlink" in argv:
+            return _completed(argv, 127, err='exec: "readlink": executable file not found in $PATH')
+        raise AssertionError(f"cat must not run: {argv}")
+
+    with patch.object(k.subprocess, "run", side_effect=fake_run):
+        result = k.read_file_from_container(namespace="prod", pod="api", path="/app/link-to-token")
+    assert result["success"] is False
+    assert "could not be canonicalized" in result["error"]
+    assert "executable file not found" in result["error"]
+    assert "KUBECTL_FILE_READ_REQUIRE_CANONICALIZATION" in result["error"]
+    assert "run_kubectl_command" in result["error"]
+
+
+def test_read_file_legacy_fail_open_when_canonicalization_not_required():
+    def fake_run(argv, **kw):
+        if "readlink" in argv:
+            return _completed(argv, 127, err="not found")
+        return _completed(argv, 0, out="contents")
+
+    with patch.object(k, "FILE_READ_REQUIRE_CANONICALIZATION", False), \
+         patch.object(k.subprocess, "run", side_effect=fake_run) as sub:
+        result = k.read_file_from_container(namespace="prod", pod="api", path="/app/config.yaml")
+    assert result["success"] is True
+    assert sub.call_args.args[0][-2:] == ["cat", "/app/config.yaml"]
+
+
+@pytest.mark.parametrize(
+    "canonical, fragment",
+    [
+        ("/var/secrets/gcp/..2026_09_15/key.json", "/var/secrets"),  # hard root, non-operator prefix
+        ("/root/.aws/credentials", "pattern '.aws'"),
+        ("/root/notes.txt", "not under any allowed root"),
+        ("/proc/1/environ", "/proc"),
+    ],
+)
+def test_read_file_refuses_when_canonical_target_is_denied(canonical, fragment):
+    with patch.object(k, "_resolve_symlink_in_container", return_value=canonical), \
+         patch.object(k, "_run_kubectl") as m:
+        result = k.read_file_from_container(namespace="prod", pod="api", path="/app/innocent-link")
+    m.assert_not_called()
+    assert result["success"] is False
+    assert fragment in result["error"]
+    assert "/app/innocent-link" in result["error"]  # message names the caller's path
+
+
+def test_read_file_end_to_end_with_real_subprocess_mock():
+    # Full path: literal check -> readlink -> canonical check -> cat canonical.
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if "readlink" in argv:
+            return _completed(argv, 0, out="/data/real.yaml\n")
+        return _completed(argv, 0, out="key: value\n")
+
+    with patch.object(k.subprocess, "run", side_effect=fake_run):
+        result = k.read_file_from_container(
+            namespace="prod", pod="api", container="app", path="/app/link"
+        )
+    assert result == {"success": True, "stdout": "key: value\n", "stderr": "", "return_code": 0}
+    assert calls == [
+        ["kubectl", "exec", "api", "-n", "prod", "-c", "app", "--", "readlink", "-f", "/app/link"],
+        ["kubectl", "exec", "api", "-n", "prod", "-c", "app", "--", "cat", "/data/real.yaml"],
+    ]
+
+
+def test_read_file_refusal_is_returned_over_mcp():
+    # The structured refusal must survive the MCP layer (what Holmes sees).
+    from fastmcp import Client
+
+    def fake_run(argv, **kw):
+        if "readlink" in argv:
+            return _completed(argv, 127, err="readlink: not found")
+        raise AssertionError("cat must not run")
+
+    async def call():
+        async with Client(k.mcp) as client:
+            r = await client.call_tool(
+                "read_file_from_container",
+                {"namespace": "prod", "pod": "api", "path": "/app/link"},
+            )
+            return json.loads(r.content[0].text)
+
+    with patch.object(k.subprocess, "run", side_effect=fake_run):
+        body = asyncio.run(call())
+    assert body["success"] is False
+    assert "could not be canonicalized" in body["error"]
 
 
 # ── run_preapproved_kubectl_exec_command ─────────────────────────────────────
@@ -994,6 +1289,195 @@ def test_kubectl_command_rejects_dangerous_flags():
         k.validate_kubectl_args(["run", "x", "--overrides={}"])
 
 
+# ROB-978: the old denylist omitted --server / -s and every TLS override, so a
+# caller could redirect kubectl to an attacker endpoint. Every connection, TLS,
+# credential, identity and context override must be refused in every spelling
+# kubectl accepts: `--flag=value`, `--flag value`, `-s value`, glued `-svalue`,
+# and boolean short clusters ending in a value flag (`-is value` == `-i -s value`).
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["delete", "pod", "x", "--server=https://evil"],
+        ["delete", "pod", "x", "--server", "https://evil"],
+        ["delete", "pod", "x", "-s", "https://evil"],
+        ["delete", "pod", "x", "-shttps://evil"],
+        ["exec", "api", "-is", "https://evil", "--", "ls"],
+        ["exec", "api", "-tis", "https://evil", "--", "ls"],
+        ["delete", "pod", "x", "--proxy-url=http://evil"],
+        ["delete", "pod", "x", "--insecure-skip-tls-verify"],
+        ["delete", "pod", "x", "--insecure-skip-tls-verify=true"],
+        ["delete", "pod", "x", "--certificate-authority=/dev/shm/ca"],
+        ["delete", "pod", "x", "--tls-server-name=evil"],
+        ["delete", "pod", "x", "--client-certificate=/x", "--client-key=/y"],
+        ["delete", "pod", "x", "--username=a", "--password=b"],
+        ["delete", "pod", "x", "--as-user-extra=k=v"],
+        ["delete", "pod", "x", "--kuberc=/dev/shm/k"],
+        ["delete", "pod", "x", "--cache-dir=/dev/shm"],
+        ["delete", "pod", "x", "--profile=heap", "--profile-output=/dev/shm/p"],
+        ["delete", "pod", "x", "--kubeconfig=/dev/shm/kc"],
+        ["delete", "pod", "x", "--context=other"],
+        ["delete", "pod", "x", "--cluster=other"],
+        ["delete", "pod", "x", "--user=other"],
+        ["delete", "pod", "x", "--token=abc"],
+        ["delete", "pod", "x", "--token", "abc"],
+        ["delete", "pod", "x", "--as=system:masters"],
+        ["delete", "pod", "x", "--as-group=system:masters"],
+        ["delete", "pod", "x", "--as-uid=1"],
+        ["run", "x", "--image=busybox", "--overrides={}"],
+        # kubectl's WordSepNormalizeFunc accepts '_' for '-' in flag names
+        ["delete", "pod", "x", "--proxy_url=http://evil"],
+        ["delete", "pod", "x", "--insecure_skip_tls_verify"],
+        ["delete", "pod", "x", "--certificate_authority=/x"],
+        ["delete", "pod", "x", "--tls_server_name=evil"],
+        ["delete", "pod", "x", "--client_certificate=/x", "--client_key=/y"],
+        ["delete", "pod", "x", "--as_group=system:masters"],
+        ["delete", "pod", "x", "--as_user_extra=k=v"],
+        ["delete", "pod", "x", "--cache_dir=/x"],
+    ],
+)
+def test_kubectl_command_rejects_connection_and_identity_overrides(args):
+    with pytest.raises(ValueError, match="is not permitted"):
+        k.validate_kubectl_args(list(args))
+
+
+# Flags the allowed verbs legitimately use must keep working, including short
+# forms, glued short values, boolean clusters, and the `--flag value` shape.
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["rollout", "restart", "deployment/api", "-n", "prod"],
+        ["rollout", "undo", "deployment/api", "--to-revision=2"],
+        ["rollout", "status", "deployment/api", "-w", "--timeout=60s"],
+        ["scale", "deployment/api", "--replicas=3", "--namespace", "prod"],
+        ["delete", "pod", "x", "--grace-period=0", "--force"],
+        ["delete", "pod", "x", "--grace-period", "-1"],
+        ["delete", "pod", "-l", "app=api", "-A"],
+        ["delete", "pod", "-lapp=api"],
+        ["delete", "pod", "-lservice=api"],  # glued -l value containing an 's'
+        ["patch", "deployment/api", "-p", "{spec:{replicas:2}}", "--type=merge"],
+        ["exec", "api", "-it", "-c", "sidecar", "--", "sh"],
+        ["exec", "api", "-ti", "--", "sh"],
+        ["exec", "-n", "prod", "-cistio-proxy", "api", "--", "ls"],
+        ["drain", "node-1", "--ignore-daemonsets", "--delete-emptydir-data"],
+        ["taint", "nodes", "node-1", "key=value:NoSchedule", "--overwrite"],
+        ["label", "pod", "x", "tier=web", "--overwrite", "--dry-run=server"],
+        ["run", "probe", "--image=busybox", "--restart=Never", "-i", "--rm", "-q"],
+        ["run", "probe", "--image=busybox", "--override-type=strategic"],
+        ["delete", "pod", "x", "-o", "name", "-v=2", "--request-timeout=10s"],
+    ],
+)
+def test_kubectl_command_accepts_legitimate_flags(args):
+    assert k.validate_kubectl_args(list(args)) == args
+
+
+def test_kubectl_command_flags_after_double_dash_are_in_container_argv():
+    # pflag stops parsing at `--`; `--server` here is an argument to `ls` inside
+    # the container, not a kubectl flag. Shell chars are still rejected there.
+    args = ["exec", "api", "--", "ls", "--server=https://evil"]
+    assert k.validate_kubectl_args(list(args)) == args
+    with pytest.raises(ValueError):
+        k.validate_kubectl_args(["exec", "api", "--", "ls;", "curl", "evil"])
+
+
+def test_kubectl_command_dangerous_flag_before_verb_is_rejected_as_verb():
+    with pytest.raises(ValueError, match="not in the allowed verb list"):
+        k.validate_kubectl_args(["-s", "https://evil", "delete", "pod", "x"])
+
+
+@pytest.mark.parametrize(
+    "arg, names",
+    [
+        ("--server=https://x", ["--server"]),
+        ("--server", ["--server"]),
+        ("-s", ["-s"]),
+        ("-shttps://x", ["-s"]),
+        ("-is", ["-i", "-s"]),
+        ("-tis", ["-t", "-i", "-s"]),
+        ("-lapp=x", ["-l"]),
+        ("-lservice", ["-l"]),
+        ("-n", ["-n"]),
+        ("-i=true", ["-i"]),
+        ("pod", []),
+        ("-", []),
+        ("--", []),
+        ("-1", ["-1"]),
+        ("--proxy_url=http://x", ["--proxy-url"]),
+        ("--insecure_skip_tls_verify", ["--insecure-skip-tls-verify"]),
+    ],
+)
+def test_flag_names_normalization(arg, names):
+    assert k._flag_names(arg) == names
+
+
+def test_builtin_dangerous_flags_are_not_removable_via_env():
+    # KUBECTL_DANGEROUS_FLAGS is additive: an operator (or chart value) cannot
+    # shrink the built-in set, only widen it.
+    with patch.dict(os.environ, {"KUBECTL_DANGEROUS_FLAGS": "--foo"}):
+        env_flags = set(k._split_csv(os.environ["KUBECTL_DANGEROUS_FLAGS"]))
+        effective = k.BUILTIN_DANGEROUS_FLAGS | env_flags
+    assert k.BUILTIN_DANGEROUS_FLAGS <= effective
+    assert "--foo" in effective
+    with patch.dict(os.environ, {"KUBECTL_DANGEROUS_FLAGS": ""}):
+        assert k.BUILTIN_DANGEROUS_FLAGS <= (
+            k.BUILTIN_DANGEROUS_FLAGS
+            | set(k._split_csv(os.environ["KUBECTL_DANGEROUS_FLAGS"]))
+        )
+    for required in (
+        "--server", "-s", "--proxy-url", "--insecure-skip-tls-verify",
+        "--certificate-authority", "--tls-server-name", "--token",
+        "--client-certificate", "--client-key", "--username", "--password",
+        "--as", "--as-group", "--as-uid", "--as-user-extra", "--kubeconfig",
+        "--context", "--cluster", "--user", "--kuberc", "--overrides",
+    ):
+        assert required in k.BUILTIN_DANGEROUS_FLAGS, required
+    assert k.BUILTIN_DANGEROUS_FLAGS <= k.DANGEROUS_FLAGS
+
+
+def test_kubectl_command_tool_refuses_server_override_before_execution():
+    with patch.object(k, "ALLOW_ARBITRARY_COMMANDS", True), \
+         patch.object(k, "_run_kubectl") as m:
+        result = k.run_kubectl_command(["delete", "pod", "x", "-shttps://evil"])
+    assert result["success"] is False
+    assert "-s" in result["error"]
+    m.assert_not_called()
+
+
+def test_run_kubectl_closes_stdin():
+    # A kubectl config without credentials prompts on stdin; DEVNULL turns that
+    # hang into an immediate error instead of a KUBECTL_TIMEOUT-long stall.
+    with patch.object(k.subprocess, "run") as m:
+        m.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        k._run_kubectl(["delete", "pod", "x"])
+    assert m.call_args.kwargs["stdin"] is k.subprocess.DEVNULL
+
+
+def test_config_reports_builtin_dangerous_flags():
+    cfg = k.get_remediation_mcp_config()
+    for f in ("--server", "-s", "--proxy-url", "--insecure-skip-tls-verify"):
+        assert f in cfg["dangerous_flags"]
+
+
+@pytest.mark.parametrize("args", [[], ["kubectl"]])
+def test_kubectl_command_rejects_empty_argv(args):
+    with pytest.raises(ValueError, match="No (arguments|command) provided"):
+        k.validate_kubectl_args(list(args))
+
+
+def test_run_kubectl_reports_timeout():
+    with patch.object(
+        k.subprocess, "run", side_effect=k.subprocess.TimeoutExpired("kubectl", 7)
+    ):
+        result = k._run_kubectl(["delete", "pod", "x"], timeout=7)
+    assert result["success"] is False
+    assert "timed out after 7 seconds" in result["error"]
+
+
+def test_run_kubectl_reports_launch_failure():
+    with patch.object(k.subprocess, "run", side_effect=FileNotFoundError("kubectl")):
+        result = k._run_kubectl(["delete", "pod", "x"])
+    assert result == {"success": False, "error": "kubectl", "stdout": "", "stderr": ""}
+
+
 def test_kubectl_command_rejects_shell_metachars():
     with pytest.raises(ValueError):
         k.validate_kubectl_args(["delete", "pod;rm -rf /"])
@@ -1038,12 +1522,19 @@ def test_get_config_returns_effective_policy():
         "diagnostic_hard_denied_hostnames",
         "file_read_allowed_paths",
         "file_read_denied_paths",
+        "file_read_hard_denied_paths",
+        "file_read_hard_denied_patterns",
+        "file_read_require_canonicalization",
         "allow_arbitrary_kubectl_commands",
         "timeout_seconds",
         "gpu_node_diagnostics",
     }
     assert "run" in cfg["allowed_commands"]
     assert "/var/run/secrets/" in cfg["file_read_denied_paths"]
+    assert "/" not in cfg["file_read_allowed_paths"]
+    assert "/var/secrets" in cfg["file_read_hard_denied_paths"]
+    assert ".aws" in cfg["file_read_hard_denied_patterns"]
+    assert cfg["file_read_require_canonicalization"] is True
     # The diagnostic target policy is discoverable, including that external
     # targets are off by default.
     assert cfg["diagnostic_allow_external_targets"] is False

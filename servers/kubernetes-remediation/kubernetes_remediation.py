@@ -36,7 +36,8 @@ Defense in depth (independent of approval):
     - Hard verb allowlist for run_kubectl_command
     - Dangerous flag blocklist
     - Shell metacharacter rejection (and shell=False everywhere)
-    - Path policy can never read secret/token mounts
+    - Path policy can never read secret/token mounts or credential files, and
+      refuses paths it cannot canonicalize inside the container
     - Diagnostic-pod target policy: cloud-metadata/link-local/loopback refused in
       every IP spelling, external targets off by default, redirect-following
       refused — plus an egress NetworkPolicy on the pod as the CNI-enforced
@@ -50,6 +51,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import fnmatch
 import posixpath
 import re
 import uuid
@@ -97,15 +99,53 @@ ALLOWED_COMMANDS = set(
     )
 )
 
-# Flags that are always blocked (credential/context hijacking, impersonation).
-DANGEROUS_FLAGS = set(
-    _split_csv(
-        os.getenv(
-            "KUBECTL_DANGEROUS_FLAGS",
-            "--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid",
-        )
-    )
+# Flags always blocked on `run_kubectl_command`: every kubectl global flag that
+# changes where a request goes, what TLS trust it uses, who it authenticates as,
+# or writes to a caller-chosen path (ROB-978). Hard-coded and not operator-
+# removable; KUBECTL_DANGEROUS_FLAGS is additive.
+BUILTIN_DANGEROUS_FLAGS = frozenset(
+    {
+        # API endpoint / transport
+        "--server",
+        "-s",
+        "--proxy-url",
+        # TLS trust
+        "--insecure-skip-tls-verify",
+        "--certificate-authority",
+        "--tls-server-name",
+        # Client credentials
+        "--token",
+        "--client-certificate",
+        "--client-key",
+        "--username",
+        "--password",
+        # Impersonation
+        "--as",
+        "--as-group",
+        "--as-uid",
+        "--as-user-extra",
+        # kubeconfig / context / preferences files
+        "--kubeconfig",
+        "--context",
+        "--cluster",
+        "--user",
+        "--kuberc",
+        # Pod-spec override (privilege escalation via arbitrary spec)
+        "--overrides",
+        # Writes to a caller-chosen local path
+        "--profile",
+        "--profile-output",
+        "--cache-dir",
+    }
 )
+DANGEROUS_FLAGS = BUILTIN_DANGEROUS_FLAGS | set(
+    _split_csv(os.getenv("KUBECTL_DANGEROUS_FLAGS", ""))
+)
+
+# Boolean short flags across the allowed verbs and global options. pflag lets
+# them be clustered with one value-taking flag last (`-is X` == `-i -s X`); any
+# other short flag consumes the rest of the token as its value (`-lapp=x`).
+_BOOLEAN_SHORT_FLAGS = frozenset("ARhiqtw")
 
 # Read-only diagnostic binaries that may run inside a container via
 # `run_preapproved_kubectl_exec_command` (auto-approved, no human approval). The
@@ -167,14 +207,32 @@ DIAGNOSTIC_INTERNAL_DNS_SUFFIXES = _split_csv(
 )
 
 # read_file_from_container path policy.
+#
+# Allow roots default to the conventional application/config/log locations
+# rather than "/": a bare "/" makes the policy a denylist, and no denylist can
+# enumerate every path a credential may live at (ROB-973). Operators widen this
+# per environment; "/" is still accepted (a startup warning is logged).
+FILE_READ_DEFAULT_ALLOWED_PATHS = (
+    "/app,/config,/data,/etc,/home,/opt,/srv,/tmp,/usr,/var/lib,/var/log,/var/tmp,/var/www,/workspace"
+)
 FILE_READ_ALLOWED_PATHS = _split_csv(
-    os.getenv("KUBECTL_FILE_READ_ALLOWED_PATHS", "/")
-) or ["/"]
+    os.getenv("KUBECTL_FILE_READ_ALLOWED_PATHS", FILE_READ_DEFAULT_ALLOWED_PATHS)
+) or _split_csv(FILE_READ_DEFAULT_ALLOWED_PATHS)
 FILE_READ_DENIED_PATHS = _split_csv(
     os.getenv(
         "KUBECTL_FILE_READ_DENIED_PATHS",
         "/var/run/secrets/,/run/secrets/,/var/run/secrets/kubernetes.io/serviceaccount/",
     )
+)
+
+# read_file_from_container resolves the requested path inside the container
+# (`readlink -f`) and re-checks the canonical target, so a symlink under an
+# allowed root cannot route around the policy. When resolution is impossible
+# (no `readlink` in the image, exec failure, unparsable output) the read is
+# REFUSED rather than falling back to the literal-path check; set to "false"
+# to restore the pre-1.4.0 fail-open behaviour.
+FILE_READ_REQUIRE_CANONICALIZATION = _env_bool(
+    "KUBECTL_FILE_READ_REQUIRE_CANONICALIZATION", True
 )
 
 # Whether the approval-gated fallback is enabled at all.
@@ -195,7 +253,69 @@ SHELL_CHARS = set(";|&$`\\'\"\n\r")
 #   /sys   -> kernel/device internals.
 #   /dev   -> raw devices (e.g. /dev/mem).
 # None of these hold application source code, so blocking them costs nothing.
-HARD_DENIED_PATHS = ["/proc", "/sys", "/dev"]
+#
+# The remaining roots are credential mount conventions used by Kubernetes,
+# Vault, and this repository's own integrations (gcp-mcp mounts its service
+# account key at /var/secrets/gcp): denying them is not left to the operator
+# list.
+HARD_DENIED_PATHS = [
+    "/proc",
+    "/sys",
+    "/dev",
+    "/var/run/secrets",
+    "/run/secrets",
+    "/var/secrets",
+    "/etc/secrets",
+    "/secrets",
+    "/vault/secrets",
+    "/etc/kubernetes/pki",
+    "/etc/ssl/private",
+    "/etc/shadow",
+    "/etc/shadow-",
+    "/etc/gshadow",
+    "/etc/gshadow-",
+]
+
+# Credential files and directories denied at ANY depth, matched per path
+# segment with shell globs (case-insensitive). Each rule is a sequence of
+# consecutive segments. Covers home-directory credential stores of the cloud
+# CLIs this repo's integrations run as root (/root/.aws, /root/.config/gcloud),
+# dotenv files, private keys and keystores.
+HARD_DENIED_PATH_PATTERNS = [
+    (".aws",),
+    (".azure",),
+    (".config", "gcloud"),
+    (".kube",),
+    (".ssh",),
+    (".docker",),
+    (".gnupg",),
+    (".oci",),
+    (".boto",),
+    (".netrc",),
+    (".git-credentials",),
+    (".npmrc",),
+    (".pypirc",),
+    (".pgpass",),
+    (".my.cnf",),
+    (".terraformrc",),
+    (".terraform.d", "credentials*"),
+    (".vault-token",),
+    (".env",),
+    (".env.*",),
+    ("*credentials*",),
+    ("*.pem",),
+    ("*.key",),
+    ("*.p12",),
+    ("*.pfx",),
+    ("*.jks",),
+    ("*.keystore",),
+    ("*.kubeconfig",),
+    ("kubeconfig",),
+    ("id_rsa*",),
+    ("id_dsa*",),
+    ("id_ecdsa*",),
+    ("id_ed25519*",),
+]
 
 # Networks a diagnostic pod may NEVER be pointed at, regardless of
 # KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS (not operator-removable, same
@@ -512,7 +632,7 @@ NODE_CHECKS: Dict[str, str] = {**GPU_CHECKS, **HOST_CHECKS}
 
 
 # Create MCP server
-mcp = FastMCP(name="kubernetes-remediation", version="1.3.0")
+mcp = FastMCP(name="kubernetes-remediation", version="1.4.0")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -599,9 +719,12 @@ def _run_kubectl(args: List[str], timeout: Optional[int] = None) -> Dict[str, An
     effective_timeout = timeout if timeout is not None else TIMEOUT
     try:
         logger.info(f"Executing kubectl with args: {args}")
+        # DEVNULL: a credential-less kubectl config prompts on stdin and would
+        # otherwise hang until the timeout.
         result = subprocess.run(
             ["kubectl"] + args,
             shell=False,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=effective_timeout,
@@ -679,16 +802,48 @@ def validate_kubectl_args(args: List[str]) -> List[str]:
             f"Allowed verbs: {', '.join(sorted(ALLOWED_COMMANDS))}"
         )
 
+    # pflag stops flag parsing at the first bare `--`; what follows is
+    # positional or the in-container argv and cannot register as a kubectl flag.
+    kubectl_args = args[: args.index("--")] if "--" in args else args
+    for arg in kubectl_args:
+        for flag in _flag_names(arg):
+            if flag in DANGEROUS_FLAGS:
+                raise ValueError(
+                    f"Flag '{flag}' is not permitted: kubectl connection, TLS, "
+                    f"credential, identity and context overrides are blocked on "
+                    f"this server (argument {arg!r})"
+                )
     for arg in args:
-        flag = arg.split("=")[0]
-        if flag in DANGEROUS_FLAGS:
-            raise ValueError(f"Flag '{flag}' is not permitted")
-        # Block --overrides flag (privilege escalation risk via pod spec).
-        if flag == "--overrides":
-            raise ValueError("Flag '--overrides' is not permitted")
         _reject_shell_chars(arg, "argument")
 
     return args
+
+
+def _flag_names(arg: str) -> List[str]:
+    """
+    Return the kubectl flag name(s) an argv token would register as, normalized
+    to the spelling used in DANGEROUS_FLAGS. Positionals return [].
+
+      '--server=https://x'  -> ['--server']
+      '--server'            -> ['--server']      (value is the next token)
+      '-s'                  -> ['-s']
+      '-shttps://x'         -> ['-s']            (glued short value)
+      '-is'                 -> ['-i', '-s']      (boolean cluster + value flag)
+      '-lapp=x'             -> ['-l']            (-l takes the rest as value)
+      '--proxy_url=http://x' -> ['--proxy-url']   (kubectl normalizes _ to -)
+      'pod', '-', '--'      -> []
+    """
+    if len(arg) < 2 or not arg.startswith("-") or arg == "--":
+        return []
+    if arg.startswith("--"):
+        return [arg.split("=", 1)[0].replace("_", "-")]
+    cluster = arg.split("=", 1)[0][1:]
+    names: List[str] = []
+    for ch in cluster:
+        names.append(f"-{ch}")
+        if ch not in _BOOLEAN_SHORT_FLAGS:
+            break  # value-taking short: the remainder is its value
+    return names
 
 
 def _image_repository(image: str) -> str:
@@ -1020,19 +1175,41 @@ def _path_is_under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
+def _matching_hard_denied_pattern(path: str) -> Optional[str]:
+    """Return the first HARD_DENIED_PATH_PATTERNS rule matching any run of
+    consecutive segments of `path` (case-insensitive glob), else None."""
+    segments = [seg.lower() for seg in path.split("/") if seg]
+    for rule in HARD_DENIED_PATH_PATTERNS:
+        width = len(rule)
+        for start in range(len(segments) - width + 1):
+            if all(
+                fnmatch.fnmatchcase(segments[start + i], rule[i].lower())
+                for i in range(width)
+            ):
+                return "/".join(rule)
+    return None
+
+
 def _enforce_read_policy(candidate: str, original: str) -> None:
     """
-    Enforce the read policy on an already-absolute path: hard-denied
-    pseudo-filesystems, then the configured deny list, then the allow list.
+    Enforce the read policy on an already-absolute path: hard-denied roots and
+    credential patterns, then the configured deny list, then the allow list.
     Denied wins ties. `original` is the user-supplied path, used in messages.
     Raises ValueError on refusal.
     """
     for hard in HARD_DENIED_PATHS:
         if _path_is_under(candidate, hard):
             raise ValueError(
-                f"Path '{original}' is restricted: it resolves under '{hard}', a system "
-                f"pseudo-filesystem that can expose secrets, env vars, or devices."
+                f"Path '{original}' is restricted: it resolves under '{hard}', which "
+                f"holds secrets, credentials, or system pseudo-filesystem data."
             )
+
+    pattern = _matching_hard_denied_pattern(candidate)
+    if pattern:
+        raise ValueError(
+            f"Path '{original}' is restricted: it matches the credential-file "
+            f"pattern '{pattern}', which is never readable."
+        )
 
     for denied in FILE_READ_DENIED_PATHS:
         if _path_is_under(candidate, denied):
@@ -1061,14 +1238,22 @@ def validate_read_path(path: str) -> str:
     return normalized
 
 
+class CanonicalizationError(Exception):
+    """The requested path could not be resolved to a canonical path inside the
+    container, so the policy cannot be applied to the real target."""
+
+
 def _resolve_symlink_in_container(
     namespace: str, pod: str, container: Optional[str], path: str
-) -> Optional[str]:
+) -> str:
     """
-    Best-effort: return the canonical path of `path` inside the container via
-    `readlink -f`, or None if it can't be resolved (e.g. the container has no
-    `readlink`). `path` is already validated to be absolute, so it cannot be
-    parsed by readlink as a flag.
+    Return the canonical (symlink-free, normalized) absolute path of `path`
+    inside the container via `readlink -f`. `path` is already validated to be
+    absolute, so it cannot be parsed by readlink as a flag.
+
+    Raises CanonicalizationError with the underlying detail (exit code, stderr)
+    when resolution is impossible — missing `readlink` binary, exec failure,
+    timeout, empty or relative output.
     """
     args = ["exec", pod, "-n", namespace]
     if container:
@@ -1082,13 +1267,21 @@ def _resolve_symlink_in_container(
             text=True,
             timeout=TIMEOUT,
         )
-    except Exception as e:  # never let resolution failure crash the read
-        logger.debug(f"symlink resolution failed for {path!r}: {e}")
-        return None
-    if result.returncode == 0:
-        canonical = result.stdout.strip()
-        return canonical or None
-    return None
+    except subprocess.TimeoutExpired:
+        raise CanonicalizationError(f"`readlink -f` timed out after {TIMEOUT}s")
+    except Exception as e:
+        raise CanonicalizationError(f"`readlink -f` could not be executed: {e}")
+    if result.returncode != 0:
+        raise CanonicalizationError(
+            f"`readlink -f {path}` exited {result.returncode}: "
+            f"{result.stderr.strip() or result.stdout.strip() or 'no output'}"
+        )
+    canonical = result.stdout.strip()
+    if not canonical.startswith("/") or "\n" in canonical:
+        raise CanonicalizationError(
+            f"`readlink -f {path}` returned an unusable path: {canonical!r}"
+        )
+    return posixpath.normpath(canonical)
 
 
 def is_preapproved_exec_command(command: List[str]) -> bool:
@@ -1269,9 +1462,12 @@ def preapproved_exec_argv_reason(command: List[str]) -> Optional[str]:
         "The `path` is validated against the server's path policy BEFORE execution "
         "and symlinks are resolved and re-checked inside the container: it must be "
         "under an allowed root and under no denied root. Secret/token mounts "
-        "(/var/run/secrets/, /run/secrets/) and the /proc, /sys, /dev "
-        "pseudo-filesystems are always denied. Denied paths return a structured "
-        "refusal naming the matched rule.\n\n"
+        "(/var/run/secrets, /run/secrets, /var/secrets, /vault/secrets, ...), "
+        "credential files (.aws, .kube, .env, *.pem, *.key, *credentials*, ...) "
+        "and the /proc, /sys, /dev pseudo-filesystems are always denied. A path "
+        "that cannot be canonicalized inside the container (no `readlink`) is "
+        "refused. Denied paths return a structured refusal naming the matched "
+        "rule.\n\n"
         "Do NOT use this server for `get`/`describe`/`logs` — the built-in Kubernetes "
         "tools are faster and need no approval.\n\n"
         "Example: read_file_from_container(namespace=\"prod\", pod=\"api-xxx\", path=\"/app/config.yaml\")"
@@ -1305,15 +1501,31 @@ def read_file_from_container(
         logger.warning(f"read_file_from_container validation failed: {e}")
         return {"success": False, "error": str(e)}
 
-    # Defense in depth against symlink routing around the path policy: resolve
-    # the path inside the container and re-check the canonical target. A symlink
-    # under an allowed root can otherwise point at a denied path (e.g. a secret
-    # mount). Best-effort — if the container has no `readlink`, we fall back to
-    # the literal-path checks above plus the hard /proc,/sys,/dev denial.
-    canonical = _resolve_symlink_in_container(namespace, pod, container, validated_path)
-    if canonical and canonical != validated_path and canonical.startswith("/"):
+    # Resolve the path inside the container and apply the policy to the
+    # canonical target, then read THAT path so a symlink swapped between the
+    # two exec calls cannot redirect the read. Resolution failure refuses the
+    # read unless the operator opted into the legacy fail-open behaviour.
+    target = validated_path
+    try:
+        target = _resolve_symlink_in_container(namespace, pod, container, validated_path)
+    except CanonicalizationError as e:
+        if FILE_READ_REQUIRE_CANONICALIZATION:
+            msg = (
+                f"Path '{path}' refused: it could not be canonicalized inside the "
+                f"container ({e}), so the path policy cannot be verified against the "
+                f"real target. If the image has no `readlink`, use run_kubectl_command "
+                f"(requires human approval) or set "
+                f"KUBECTL_FILE_READ_REQUIRE_CANONICALIZATION=false on the server."
+            )
+            logger.warning(f"read_file_from_container refused: {msg}")
+            return {"success": False, "error": msg}
+        logger.warning(
+            f"read_file_from_container: canonicalization failed ({e}); proceeding "
+            f"on the literal path because KUBECTL_FILE_READ_REQUIRE_CANONICALIZATION=false"
+        )
+    else:
         try:
-            _enforce_read_policy(posixpath.normpath(canonical), path)
+            _enforce_read_policy(target, path)
         except ValueError as e:
             logger.warning(f"read_file_from_container refused after symlink resolution: {e}")
             return {"success": False, "error": str(e)}
@@ -1321,7 +1533,7 @@ def read_file_from_container(
     exec_args = ["exec", pod, "-n", namespace]
     if container:
         exec_args.extend(["-c", container])
-    exec_args.extend(["--", "cat", validated_path])
+    exec_args.extend(["--", "cat", target])
     return _run_kubectl(exec_args)
 
 
@@ -1802,6 +2014,9 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
         "diagnostic_hard_denied_hostnames": sorted(DIAGNOSTIC_HARD_DENIED_HOSTNAMES),
         "file_read_allowed_paths": list(FILE_READ_ALLOWED_PATHS),
         "file_read_denied_paths": list(FILE_READ_DENIED_PATHS),
+        "file_read_hard_denied_paths": list(HARD_DENIED_PATHS),
+        "file_read_hard_denied_patterns": ["/".join(r) for r in HARD_DENIED_PATH_PATTERNS],
+        "file_read_require_canonicalization": FILE_READ_REQUIRE_CANONICALIZATION,
         "allow_arbitrary_kubectl_commands": ALLOW_ARBITRARY_COMMANDS,
         "timeout_seconds": TIMEOUT,
         "gpu_node_diagnostics": {
@@ -1832,9 +2047,11 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
         "non-allowlisted images via `kubectl run`. Reach for the no-approval tools "
         "first; use this only when a pre-approved tool can't accomplish the task, and "
         "express the full intent in one clear command.\n\n"
-        "Refused (independent of approval): verbs outside the hard allowlist, blocked "
-        "flags (--kubeconfig/--context/--token/--as/...), --overrides, and shell "
-        "metacharacters. When the server runs in locked-down mode "
+        "Refused (independent of approval): verbs outside the hard allowlist, every "
+        "connection/TLS/credential/identity/context override (--server/-s, "
+        "--proxy-url, --insecure-skip-tls-verify, --certificate-authority, --token, "
+        "--kubeconfig, --context, --as, ...), --overrides, and shell metacharacters. "
+        "When the server runs in locked-down mode "
         "(allowArbitraryKubectlCommands=false) this tool is disabled.\n\n"
         "Example: run_kubectl_command(args=[\"rollout\",\"restart\",\"deployment/api\",\"-n\",\"prod\"])"
     ),
@@ -1891,7 +2108,22 @@ if __name__ == "__main__":
         f"Diagnostic internal DNS suffixes: {DIAGNOSTIC_INTERNAL_DNS_SUFFIXES}"
     )
     logger.info(f"File-read allowed paths: {FILE_READ_ALLOWED_PATHS}")
+    if any(posixpath.normpath(root) == "/" for root in FILE_READ_ALLOWED_PATHS):
+        logger.warning(
+            "KUBECTL_FILE_READ_ALLOWED_PATHS contains '/': every file not covered "
+            "by the deny lists is readable by the auto-approved "
+            "read_file_from_container tool (ROB-973). Prefer explicit roots."
+        )
     logger.info(f"File-read denied paths: {FILE_READ_DENIED_PATHS}")
+    logger.info(f"File-read hard-denied roots: {HARD_DENIED_PATHS}")
+    if FILE_READ_REQUIRE_CANONICALIZATION:
+        logger.info("File-read canonicalization: REQUIRED (fail closed)")
+    else:
+        logger.warning(
+            "KUBECTL_FILE_READ_REQUIRE_CANONICALIZATION=false: reads proceed on the "
+            "literal path when the container cannot resolve symlinks, so a symlink "
+            "under an allowed root may reach a denied target (ROB-973)."
+        )
     logger.info(f"Allow arbitrary kubectl commands: {ALLOW_ARBITRARY_COMMANDS}")
     logger.info(f"Timeout: {TIMEOUT}s")
     logger.info(f"GPU node diagnostics enabled: {GPU_DIAG_ENABLED}")
