@@ -97,15 +97,53 @@ ALLOWED_COMMANDS = set(
     )
 )
 
-# Flags that are always blocked (credential/context hijacking, impersonation).
-DANGEROUS_FLAGS = set(
-    _split_csv(
-        os.getenv(
-            "KUBECTL_DANGEROUS_FLAGS",
-            "--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid",
-        )
-    )
+# Flags always blocked on `run_kubectl_command`: every kubectl global flag that
+# changes where a request goes, what TLS trust it uses, who it authenticates as,
+# or writes to a caller-chosen path (ROB-978). Hard-coded and not operator-
+# removable; KUBECTL_DANGEROUS_FLAGS is additive.
+BUILTIN_DANGEROUS_FLAGS = frozenset(
+    {
+        # API endpoint / transport
+        "--server",
+        "-s",
+        "--proxy-url",
+        # TLS trust
+        "--insecure-skip-tls-verify",
+        "--certificate-authority",
+        "--tls-server-name",
+        # Client credentials
+        "--token",
+        "--client-certificate",
+        "--client-key",
+        "--username",
+        "--password",
+        # Impersonation
+        "--as",
+        "--as-group",
+        "--as-uid",
+        "--as-user-extra",
+        # kubeconfig / context / preferences files
+        "--kubeconfig",
+        "--context",
+        "--cluster",
+        "--user",
+        "--kuberc",
+        # Pod-spec override (privilege escalation via arbitrary spec)
+        "--overrides",
+        # Writes to a caller-chosen local path
+        "--profile",
+        "--profile-output",
+        "--cache-dir",
+    }
 )
+DANGEROUS_FLAGS = BUILTIN_DANGEROUS_FLAGS | set(
+    _split_csv(os.getenv("KUBECTL_DANGEROUS_FLAGS", ""))
+)
+
+# Boolean short flags across the allowed verbs and global options. pflag lets
+# them be clustered with one value-taking flag last (`-is X` == `-i -s X`); any
+# other short flag consumes the rest of the token as its value (`-lapp=x`).
+_BOOLEAN_SHORT_FLAGS = frozenset("ARhiqtw")
 
 # Read-only diagnostic binaries that may run inside a container via
 # `run_preapproved_kubectl_exec_command` (auto-approved, no human approval). The
@@ -677,9 +715,12 @@ def _run_kubectl(args: List[str], timeout: Optional[int] = None) -> Dict[str, An
     effective_timeout = timeout if timeout is not None else TIMEOUT
     try:
         logger.info(f"Executing kubectl with args: {args}")
+        # DEVNULL: a credential-less kubectl config prompts on stdin and would
+        # otherwise hang until the timeout.
         result = subprocess.run(
             ["kubectl"] + args,
             shell=False,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=effective_timeout,
@@ -757,16 +798,48 @@ def validate_kubectl_args(args: List[str]) -> List[str]:
             f"Allowed verbs: {', '.join(sorted(ALLOWED_COMMANDS))}"
         )
 
+    # pflag stops flag parsing at the first bare `--`; what follows is
+    # positional or the in-container argv and cannot register as a kubectl flag.
+    kubectl_args = args[: args.index("--")] if "--" in args else args
+    for arg in kubectl_args:
+        for flag in _flag_names(arg):
+            if flag in DANGEROUS_FLAGS:
+                raise ValueError(
+                    f"Flag '{flag}' is not permitted: kubectl connection, TLS, "
+                    f"credential, identity and context overrides are blocked on "
+                    f"this server (argument {arg!r})"
+                )
     for arg in args:
-        flag = arg.split("=")[0]
-        if flag in DANGEROUS_FLAGS:
-            raise ValueError(f"Flag '{flag}' is not permitted")
-        # Block --overrides flag (privilege escalation risk via pod spec).
-        if flag == "--overrides":
-            raise ValueError("Flag '--overrides' is not permitted")
         _reject_shell_chars(arg, "argument")
 
     return args
+
+
+def _flag_names(arg: str) -> List[str]:
+    """
+    Return the kubectl flag name(s) an argv token would register as, normalized
+    to the spelling used in DANGEROUS_FLAGS. Positionals return [].
+
+      '--server=https://x'  -> ['--server']
+      '--server'            -> ['--server']      (value is the next token)
+      '-s'                  -> ['-s']
+      '-shttps://x'         -> ['-s']            (glued short value)
+      '-is'                 -> ['-i', '-s']      (boolean cluster + value flag)
+      '-lapp=x'             -> ['-l']            (-l takes the rest as value)
+      '--proxy_url=http://x' -> ['--proxy-url']   (kubectl normalizes _ to -)
+      'pod', '-', '--'      -> []
+    """
+    if len(arg) < 2 or not arg.startswith("-") or arg == "--":
+        return []
+    if arg.startswith("--"):
+        return [arg.split("=", 1)[0].replace("_", "-")]
+    cluster = arg.split("=", 1)[0][1:]
+    names: List[str] = []
+    for ch in cluster:
+        names.append(f"-{ch}")
+        if ch not in _BOOLEAN_SHORT_FLAGS:
+            break  # value-taking short: the remainder is its value
+    return names
 
 
 def _image_repository(image: str) -> str:
@@ -1813,9 +1886,11 @@ def get_remediation_mcp_config() -> Dict[str, Any]:
         "non-allowlisted images via `kubectl run`. Reach for the no-approval tools "
         "first; use this only when a pre-approved tool can't accomplish the task, and "
         "express the full intent in one clear command.\n\n"
-        "Refused (independent of approval): verbs outside the hard allowlist, blocked "
-        "flags (--kubeconfig/--context/--token/--as/...), --overrides, and shell "
-        "metacharacters. When the server runs in locked-down mode "
+        "Refused (independent of approval): verbs outside the hard allowlist, every "
+        "connection/TLS/credential/identity/context override (--server/-s, "
+        "--proxy-url, --insecure-skip-tls-verify, --certificate-authority, --token, "
+        "--kubeconfig, --context, --as, ...), --overrides, and shell metacharacters. "
+        "When the server runs in locked-down mode "
         "(allowArbitraryKubectlCommands=false) this tool is disabled.\n\n"
         "Example: run_kubectl_command(args=[\"rollout\",\"restart\",\"deployment/api\",\"-n\",\"prod\"])"
     ),

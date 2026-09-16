@@ -28,9 +28,12 @@ spec:
         - name: KUBECTL_ALLOWED_COMMANDS
           value: "edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec"
 
-        # Dangerous flags that are always blocked
+        # ADDITIONAL flags to block on run_kubectl_command. The server always
+        # blocks its built-in set (--server/-s, --proxy-url, TLS trust, client
+        # credentials, impersonation, kubeconfig/context/kuberc, --overrides,
+        # profiling/cache paths) and this list can only widen it, never shrink it.
         - name: KUBECTL_DANGEROUS_FLAGS
-          value: "--kubeconfig,--context,--cluster,--user,--token,--as,--as-group,--as-uid"
+          value: ""
 
         # Pre-approved read-only in-container binaries for
         # run_preapproved_kubectl_exec_command (auto-approved)

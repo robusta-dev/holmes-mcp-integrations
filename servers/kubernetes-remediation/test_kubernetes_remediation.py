@@ -11,8 +11,9 @@ Run with:  pytest servers/kubernetes-remediation/test_kubernetes_remediation.py
 
 import asyncio
 import json
+import os
+from unittest.mock import MagicMock, patch
 import subprocess
-from unittest.mock import patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -1029,6 +1030,195 @@ def test_kubectl_command_rejects_dangerous_flags():
         k.validate_kubectl_args(["delete", "pod", "x", "--token=abc"])
     with pytest.raises(ValueError):
         k.validate_kubectl_args(["run", "x", "--overrides={}"])
+
+
+# ROB-978: the old denylist omitted --server / -s and every TLS override, so a
+# caller could redirect kubectl to an attacker endpoint. Every connection, TLS,
+# credential, identity and context override must be refused in every spelling
+# kubectl accepts: `--flag=value`, `--flag value`, `-s value`, glued `-svalue`,
+# and boolean short clusters ending in a value flag (`-is value` == `-i -s value`).
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["delete", "pod", "x", "--server=https://evil"],
+        ["delete", "pod", "x", "--server", "https://evil"],
+        ["delete", "pod", "x", "-s", "https://evil"],
+        ["delete", "pod", "x", "-shttps://evil"],
+        ["exec", "api", "-is", "https://evil", "--", "ls"],
+        ["exec", "api", "-tis", "https://evil", "--", "ls"],
+        ["delete", "pod", "x", "--proxy-url=http://evil"],
+        ["delete", "pod", "x", "--insecure-skip-tls-verify"],
+        ["delete", "pod", "x", "--insecure-skip-tls-verify=true"],
+        ["delete", "pod", "x", "--certificate-authority=/dev/shm/ca"],
+        ["delete", "pod", "x", "--tls-server-name=evil"],
+        ["delete", "pod", "x", "--client-certificate=/x", "--client-key=/y"],
+        ["delete", "pod", "x", "--username=a", "--password=b"],
+        ["delete", "pod", "x", "--as-user-extra=k=v"],
+        ["delete", "pod", "x", "--kuberc=/dev/shm/k"],
+        ["delete", "pod", "x", "--cache-dir=/dev/shm"],
+        ["delete", "pod", "x", "--profile=heap", "--profile-output=/dev/shm/p"],
+        ["delete", "pod", "x", "--kubeconfig=/dev/shm/kc"],
+        ["delete", "pod", "x", "--context=other"],
+        ["delete", "pod", "x", "--cluster=other"],
+        ["delete", "pod", "x", "--user=other"],
+        ["delete", "pod", "x", "--token=abc"],
+        ["delete", "pod", "x", "--token", "abc"],
+        ["delete", "pod", "x", "--as=system:masters"],
+        ["delete", "pod", "x", "--as-group=system:masters"],
+        ["delete", "pod", "x", "--as-uid=1"],
+        ["run", "x", "--image=busybox", "--overrides={}"],
+        # kubectl's WordSepNormalizeFunc accepts '_' for '-' in flag names
+        ["delete", "pod", "x", "--proxy_url=http://evil"],
+        ["delete", "pod", "x", "--insecure_skip_tls_verify"],
+        ["delete", "pod", "x", "--certificate_authority=/x"],
+        ["delete", "pod", "x", "--tls_server_name=evil"],
+        ["delete", "pod", "x", "--client_certificate=/x", "--client_key=/y"],
+        ["delete", "pod", "x", "--as_group=system:masters"],
+        ["delete", "pod", "x", "--as_user_extra=k=v"],
+        ["delete", "pod", "x", "--cache_dir=/x"],
+    ],
+)
+def test_kubectl_command_rejects_connection_and_identity_overrides(args):
+    with pytest.raises(ValueError, match="is not permitted"):
+        k.validate_kubectl_args(list(args))
+
+
+# Flags the allowed verbs legitimately use must keep working, including short
+# forms, glued short values, boolean clusters, and the `--flag value` shape.
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["rollout", "restart", "deployment/api", "-n", "prod"],
+        ["rollout", "undo", "deployment/api", "--to-revision=2"],
+        ["rollout", "status", "deployment/api", "-w", "--timeout=60s"],
+        ["scale", "deployment/api", "--replicas=3", "--namespace", "prod"],
+        ["delete", "pod", "x", "--grace-period=0", "--force"],
+        ["delete", "pod", "x", "--grace-period", "-1"],
+        ["delete", "pod", "-l", "app=api", "-A"],
+        ["delete", "pod", "-lapp=api"],
+        ["delete", "pod", "-lservice=api"],  # glued -l value containing an 's'
+        ["patch", "deployment/api", "-p", "{spec:{replicas:2}}", "--type=merge"],
+        ["exec", "api", "-it", "-c", "sidecar", "--", "sh"],
+        ["exec", "api", "-ti", "--", "sh"],
+        ["exec", "-n", "prod", "-cistio-proxy", "api", "--", "ls"],
+        ["drain", "node-1", "--ignore-daemonsets", "--delete-emptydir-data"],
+        ["taint", "nodes", "node-1", "key=value:NoSchedule", "--overwrite"],
+        ["label", "pod", "x", "tier=web", "--overwrite", "--dry-run=server"],
+        ["run", "probe", "--image=busybox", "--restart=Never", "-i", "--rm", "-q"],
+        ["run", "probe", "--image=busybox", "--override-type=strategic"],
+        ["delete", "pod", "x", "-o", "name", "-v=2", "--request-timeout=10s"],
+    ],
+)
+def test_kubectl_command_accepts_legitimate_flags(args):
+    assert k.validate_kubectl_args(list(args)) == args
+
+
+def test_kubectl_command_flags_after_double_dash_are_in_container_argv():
+    # pflag stops parsing at `--`; `--server` here is an argument to `ls` inside
+    # the container, not a kubectl flag. Shell chars are still rejected there.
+    args = ["exec", "api", "--", "ls", "--server=https://evil"]
+    assert k.validate_kubectl_args(list(args)) == args
+    with pytest.raises(ValueError):
+        k.validate_kubectl_args(["exec", "api", "--", "ls;", "curl", "evil"])
+
+
+def test_kubectl_command_dangerous_flag_before_verb_is_rejected_as_verb():
+    with pytest.raises(ValueError, match="not in the allowed verb list"):
+        k.validate_kubectl_args(["-s", "https://evil", "delete", "pod", "x"])
+
+
+@pytest.mark.parametrize(
+    "arg, names",
+    [
+        ("--server=https://x", ["--server"]),
+        ("--server", ["--server"]),
+        ("-s", ["-s"]),
+        ("-shttps://x", ["-s"]),
+        ("-is", ["-i", "-s"]),
+        ("-tis", ["-t", "-i", "-s"]),
+        ("-lapp=x", ["-l"]),
+        ("-lservice", ["-l"]),
+        ("-n", ["-n"]),
+        ("-i=true", ["-i"]),
+        ("pod", []),
+        ("-", []),
+        ("--", []),
+        ("-1", ["-1"]),
+        ("--proxy_url=http://x", ["--proxy-url"]),
+        ("--insecure_skip_tls_verify", ["--insecure-skip-tls-verify"]),
+    ],
+)
+def test_flag_names_normalization(arg, names):
+    assert k._flag_names(arg) == names
+
+
+def test_builtin_dangerous_flags_are_not_removable_via_env():
+    # KUBECTL_DANGEROUS_FLAGS is additive: an operator (or chart value) cannot
+    # shrink the built-in set, only widen it.
+    with patch.dict(os.environ, {"KUBECTL_DANGEROUS_FLAGS": "--foo"}):
+        env_flags = set(k._split_csv(os.environ["KUBECTL_DANGEROUS_FLAGS"]))
+        effective = k.BUILTIN_DANGEROUS_FLAGS | env_flags
+    assert k.BUILTIN_DANGEROUS_FLAGS <= effective
+    assert "--foo" in effective
+    with patch.dict(os.environ, {"KUBECTL_DANGEROUS_FLAGS": ""}):
+        assert k.BUILTIN_DANGEROUS_FLAGS <= (
+            k.BUILTIN_DANGEROUS_FLAGS
+            | set(k._split_csv(os.environ["KUBECTL_DANGEROUS_FLAGS"]))
+        )
+    for required in (
+        "--server", "-s", "--proxy-url", "--insecure-skip-tls-verify",
+        "--certificate-authority", "--tls-server-name", "--token",
+        "--client-certificate", "--client-key", "--username", "--password",
+        "--as", "--as-group", "--as-uid", "--as-user-extra", "--kubeconfig",
+        "--context", "--cluster", "--user", "--kuberc", "--overrides",
+    ):
+        assert required in k.BUILTIN_DANGEROUS_FLAGS, required
+    assert k.BUILTIN_DANGEROUS_FLAGS <= k.DANGEROUS_FLAGS
+
+
+def test_kubectl_command_tool_refuses_server_override_before_execution():
+    with patch.object(k, "ALLOW_ARBITRARY_COMMANDS", True), \
+         patch.object(k, "_run_kubectl") as m:
+        result = k.run_kubectl_command(["delete", "pod", "x", "-shttps://evil"])
+    assert result["success"] is False
+    assert "-s" in result["error"]
+    m.assert_not_called()
+
+
+def test_run_kubectl_closes_stdin():
+    # A kubectl config without credentials prompts on stdin; DEVNULL turns that
+    # hang into an immediate error instead of a KUBECTL_TIMEOUT-long stall.
+    with patch.object(k.subprocess, "run") as m:
+        m.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        k._run_kubectl(["delete", "pod", "x"])
+    assert m.call_args.kwargs["stdin"] is k.subprocess.DEVNULL
+
+
+def test_config_reports_builtin_dangerous_flags():
+    cfg = k.get_remediation_mcp_config()
+    for f in ("--server", "-s", "--proxy-url", "--insecure-skip-tls-verify"):
+        assert f in cfg["dangerous_flags"]
+
+
+@pytest.mark.parametrize("args", [[], ["kubectl"]])
+def test_kubectl_command_rejects_empty_argv(args):
+    with pytest.raises(ValueError, match="No (arguments|command) provided"):
+        k.validate_kubectl_args(list(args))
+
+
+def test_run_kubectl_reports_timeout():
+    with patch.object(
+        k.subprocess, "run", side_effect=k.subprocess.TimeoutExpired("kubectl", 7)
+    ):
+        result = k._run_kubectl(["delete", "pod", "x"], timeout=7)
+    assert result["success"] is False
+    assert "timed out after 7 seconds" in result["error"]
+
+
+def test_run_kubectl_reports_launch_failure():
+    with patch.object(k.subprocess, "run", side_effect=FileNotFoundError("kubectl")):
+        result = k._run_kubectl(["delete", "pod", "x"])
+    assert result == {"success": False, "error": "kubectl", "stdout": "", "stderr": ""}
 
 
 def test_kubectl_command_rejects_shell_metachars():
