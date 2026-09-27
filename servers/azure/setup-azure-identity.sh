@@ -25,6 +25,7 @@ NAMESPACE="default"
 SERVICE_ACCOUNT="azure-api-mcp-sa"
 SUBSCRIPTION_LIST=""
 ALL_SUBSCRIPTIONS="false"
+OIDC_ISSUER=""
 
 # Function to print colored output
 print_color() {
@@ -43,7 +44,8 @@ usage() {
     echo "                            - service-principal: For non-AKS K8s or local testing"
     echo "                            - managed-identity: For Azure VMs/VMSS"
     echo "  --resource-group RG      Azure resource group where managed identity will be created (for workload-identity)"
-    echo "  --aks-cluster CLUSTER    AKS cluster name (required for workload-identity)"
+    echo "  --aks-cluster CLUSTER    AKS cluster name (used to derive the OIDC issuer when --oidc-issuer is not given)"
+    echo "  --oidc-issuer URL        OIDC issuer URL of ANY cluster (AKS/EKS/GKE/self-managed). Skips AKS-specific calls."
     echo "  --namespace NS           Kubernetes namespace (default: default)"
     echo "  --service-account SA     Kubernetes service account name (default: azure-api-mcp-sa)"
     echo "  --tenant TENANT          Azure tenant ID"
@@ -54,6 +56,10 @@ usage() {
     echo "Examples:"
     echo "  # Setup workload identity for AKS (recommended for AKS clusters)"
     echo "  $0 --auth-method workload-identity --resource-group myRG --aks-cluster myAKS"
+    echo ""
+    echo "  # Setup workload identity for a non-AKS cluster (e.g. AWS EKS) via its OIDC issuer"
+    echo "  $0 --auth-method workload-identity --resource-group myRG \\"
+    echo "     --oidc-issuer https://oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
     echo ""
     echo "  # Setup for specific subscription"
     echo "  $0 --auth-method workload-identity --resource-group myRG --aks-cluster myAKS --subscriptions \"sub-id\""
@@ -79,6 +85,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --aks-cluster)
             AKS_CLUSTER="$2"
+            shift 2
+            ;;
+        --oidc-issuer)
+            OIDC_ISSUER="$2"
             shift 2
             ;;
         --namespace)
@@ -393,20 +403,32 @@ case $AUTH_METHOD in
         ;;
 
     workload-identity)
-        print_color $YELLOW "Setting up Workload Identity for AKS..."
+        print_color $YELLOW "Setting up Workload Identity..."
 
-        if [[ -z "$RESOURCE_GROUP" || -z "$AKS_CLUSTER" ]]; then
-            print_color $RED "Error: --resource-group and --aks-cluster are required for workload identity"
+        # --resource-group is always required: it holds the managed identity in Azure.
+        if [[ -z "$RESOURCE_GROUP" ]]; then
+            print_color $RED "Error: --resource-group is required for workload identity"
             exit 1
         fi
 
-        # Enable workload identity on AKS cluster
-        print_color $YELLOW "Enabling workload identity on AKS cluster..."
-        az aks update -g "$RESOURCE_GROUP" -n "$AKS_CLUSTER" --enable-oidc-issuer --enable-workload-identity
-
-        # Get OIDC issuer URL
-        OIDC_ISSUER=$(az aks show -n "$AKS_CLUSTER" -g "$RESOURCE_GROUP" --query "oidcIssuerProfile.issuerUrl" -o tsv)
-        print_color $GREEN "OIDC Issuer URL: $OIDC_ISSUER"
+        if [[ -n "$OIDC_ISSUER" ]]; then
+            # Federate to ANY OIDC issuer (AWS EKS, GKE, self-managed, or AKS).
+            # Azure workload identity trusts any publicly reachable OIDC issuer, so
+            # no AKS-specific calls are made. On non-AKS clusters the pod must
+            # project a service account token with audience api://AzureADTokenExchange
+            # (there is no AKS webhook to inject it automatically).
+            print_color $GREEN "Using provided OIDC issuer: $OIDC_ISSUER"
+        else
+            # No issuer supplied: derive it from an AKS cluster.
+            if [[ -z "$AKS_CLUSTER" ]]; then
+                print_color $RED "Error: provide --oidc-issuer, or --aks-cluster (with --resource-group) to derive it from AKS"
+                exit 1
+            fi
+            print_color $YELLOW "Enabling workload identity on AKS cluster..."
+            az aks update -g "$RESOURCE_GROUP" -n "$AKS_CLUSTER" --enable-oidc-issuer --enable-workload-identity
+            OIDC_ISSUER=$(az aks show -n "$AKS_CLUSTER" -g "$RESOURCE_GROUP" --query "oidcIssuerProfile.issuerUrl" -o tsv)
+            print_color $GREEN "OIDC Issuer URL: $OIDC_ISSUER"
+        fi
 
         # Create or get managed identity
         IDENTITY_NAME="azure-mcp-identity"
