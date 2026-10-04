@@ -1,218 +1,34 @@
-# AWS MCP Server Integration for Holmes
+# AWS MCP Server IAM setup for Holmes
 
-This directory contains resources for deploying the AWS API MCP (Model Context Protocol) server for Holmes, enabling comprehensive AWS service queries including CloudWatch Container Insights for investigating Kubernetes issues.
-
-## Overview
-
-The AWS MCP server provides Holmes with direct access to AWS APIs through a secure, read-only interface. The `awslabs.aws-api-mcp-server` package serves the MCP **Streamable HTTP** transport natively, so it runs directly (no Supergateway/Node bridge) and is reachable as a remote MCP server within Kubernetes at `http://<service>:8000/mcp`.
+Holmes talks directly to the hosted [AWS MCP Server](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/mcp-server.html) (`https://aws-mcp.<region>.api.aws/mcp`) and signs every request with its own AWS credentials, so **no image is built here any more**. The deprecated `aws-api-mcp-server` and `multi-aws-api-mcp-server` images that used to live in this directory are gone; this directory only keeps the IAM helper scripts referenced from the [Holmes AWS docs](https://holmesgpt.dev/data-sources/builtin-toolsets/aws/).
 
 ## Architecture
 
 ```
-Holmes → Remote MCP (Streamable HTTP, /mcp) → AWS MCP Server → AWS APIs
-                                  ↓
-                    Running in Kubernetes with IRSA
-                    (IAM Roles for Service Accounts)
+Holmes (SigV4 with IRSA / profiles) → https://aws-mcp.<region>.api.aws/mcp → AWS APIs
 ```
 
-## Quick Start
+## Files
+
+- **`aws-mcp-iam-policy.json`** - Read-only IAM policy for the services Holmes may query. Read-only access is enforced by this policy; the hosted server itself can run any operation the credentials allow.
+- **`enable-oidc-provider.sh`** - Associates the EKS cluster's OIDC provider with IAM (prerequisite for IRSA).
+- **`setup-irsa.sh`** - Single account: creates the policy and an IAM role whose trust policy names the **Holmes service account**, then prints the Helm values to apply.
+  ```bash
+  ./setup-irsa.sh --cluster-name my-cluster --region us-east-1 --namespace holmes --service-account holmes-holmes-service-account
+  ```
+- **`scripts/setup-multi-account-iam.sh`** - Multi-account: creates OIDC providers and roles in each target account, trusting the Holmes service account of every listed cluster, and writes `holmes_config.yaml` with the `mcpAddons.aws.multiAccount` values.
+  ```bash
+  ./scripts/setup-multi-account-iam.sh setup my-config.yaml ./aws-mcp-iam-policy.json
+  ./scripts/setup-multi-account-iam.sh verify my-config.yaml
+  ./scripts/setup-multi-account-iam.sh teardown my-config.yaml
+  ```
+  Requires `aws`, `jq` and `yq`; see `scripts/multi-cluster-config-example.yaml` for the config format.
+
+The Holmes service account is `<release>-holmes-service-account` for the Holmes chart and `robusta-holmes-service-account` for the Robusta chart.
+
+## Verify
 
 ```bash
-# 1. Set up IRSA (one command creates everything)
-./setup-irsa.sh --cluster-name my-cluster --region us-east-1
-
-# 2. Deploy with Helm (enable in values.yaml)
-helm upgrade --install holmes ./helm/holmes --set mcpAddons.aws.enabled=true
-
-# 3. Verify it's working
-kubectl get pods -l app=holmes-aws-mcp
+# Holmes must see the IAM role, not the node role
+kubectl exec -n <namespace> deploy/holmes-holmes -- python -c "import boto3; print(boto3.client('sts').get_caller_identity()['Arn'])"
 ```
-
-## Resource Files in This Directory
-
-### Core Files
-
-- **`Dockerfile`** - Runs the AWS MCP server with its native MCP Streamable HTTP transport
-  - Base image: `python:3.13-alpine` (no Supergateway/Node)
-  - Installs the `awslabs.aws-api-mcp-server` package
-  - Exposes port 8000 and serves Streamable HTTP at `/mcp`
-  - Set via env: `AWS_API_MCP_TRANSPORT=streamable-http`, `AWS_API_MCP_HOST=0.0.0.0`, `AWS_API_MCP_PORT=8000`, `AUTH_TYPE=no-auth`
-
-- **`aws-mcp-iam-policy.json`** - Comprehensive IAM policy with read-only permissions for AWS services
-  - Covers: CloudWatch, EC2, EKS, ECS, RDS, S3, IAM, Cost Management, and more
-  - All permissions are read-only (Get*, List*, Describe*)
-  - Can be shared across multiple EKS clusters
-  - No destructive operations allowed
-
-- **`setup-irsa.sh`** - Automated script to set up IRSA (IAM Roles for Service Accounts)
-  - Creates all necessary AWS and Kubernetes resources
-  - Handles the complete IRSA setup process
-  - Safe: won't overwrite existing resources, uses auto-suffix for conflicts
-  - Usage: `./setup-irsa.sh --cluster-name <name> --region <region> [--namespace <namespace>]`
-
-- **`enable-oidc-provider.sh`** - Enables OIDC provider for EKS cluster (prerequisite for IRSA)
-
-## Understanding IRSA Requirements
-
-For the AWS MCP server to access AWS APIs from within Kubernetes, it needs IRSA (IAM Roles for Service Accounts). This involves four key components:
-
-1. **OIDC Provider**: Establishes trust between your EKS cluster and AWS IAM
-2. **IAM Policy** (`holmes-aws-mcp-policy`): Defines what AWS services can be accessed (read-only)
-3. **IAM Role** (`holmes-aws-mcp-role-{cluster-name}`): AWS identity that pods can assume
-4. **Service Account** (`aws-api-mcp-sa`): Kubernetes resource that links pods to the IAM role
-
-### How IRSA Works
-
-1. Pod starts with the configured service account
-2. AWS SDK in the pod reads the service account's IAM role annotation
-3. Pod exchanges its Kubernetes token for temporary AWS credentials
-4. Pod can now make AWS API calls with the permissions from the IAM policy
-
-## Setup Instructions
-
-### 1. Prerequisites
-
-- EKS cluster running
-- AWS CLI configured with permissions to create IAM roles/policies
-- kubectl configured to access your cluster
-- eksctl installed (for OIDC provider setup)
-
-### 2. Automated Setup with setup-irsa.sh
-
-The `setup-irsa.sh` script automates the entire IRSA setup process:
-
-```bash
-# Basic usage
-./setup-irsa.sh --cluster-name my-cluster --region us-east-1
-
-# With custom namespace
-./setup-irsa.sh --cluster-name my-cluster --region us-east-1 --namespace holmes
-
-# See all options
-./setup-irsa.sh --help
-```
-
-The script will:
-1. **Check Service Account**: Ensures no existing service account conflicts
-2. **Verify/Create OIDC Provider**: Sets up trust between EKS and IAM
-3. **Create/Reuse IAM Policy**: Uses existing `holmes-aws-mcp-policy` if found, creates if not
-4. **Create IAM Role**: Creates cluster-specific role with auto-suffix if needed
-5. **Create Service Account**: Sets up Kubernetes service account with IAM role annotation
-
-### Important Notes on Multi-Cluster Setup
-
-- **IAM Policy**: Can be shared across all clusters (created once, reused many times)
-- **IAM Roles**: Must be unique per cluster (each has cluster-specific trust relationship)
-- **Service Accounts**: Created in each cluster separately
-
-Example for multiple clusters:
-```bash
-# Cluster 1
-./setup-irsa.sh --cluster-name prod --region us-east-1
-
-# Cluster 2 (will reuse the same IAM policy)
-./setup-irsa.sh --cluster-name staging --region us-east-1
-
-# Results in:
-# - One shared policy: holmes-aws-mcp-policy
-# - Two roles: holmes-aws-mcp-role-prod, holmes-aws-mcp-role-staging
-# - Service account in each cluster
-```
-
-### 3. Docker Image - Native Streamable HTTP
-
-The `awslabs.aws-api-mcp-server` package serves the MCP Streamable HTTP transport natively, so the image runs it directly — no Supergateway/Node bridge. This removes the Node CVE surface and avoids supergateway's SSE single-session crash, and lets one process serve multiple concurrent Holmes sessions.
-
-**Pre-built image available at:**
-```
-us-central1-docker.pkg.dev/genuine-flight-317411/mcp/aws-api-mcp-server:2.1.0
-```
-
-**How the Docker image works:**
-1. Uses `python:3.13-alpine` as base (no Supergateway/Node)
-2. Installs the AWS MCP server package
-3. Runs with `AWS_API_MCP_TRANSPORT=streamable-http`, serving `/mcp` on port 8000
-4. Holmes connects to it as a remote MCP server at `http://<service>:8000/mcp`
-
-**To build your own:**
-```bash
-docker build -t your-registry/aws-api-mcp-server:latest .
-docker push your-registry/aws-api-mcp-server:latest
-```
-
-### 6. Verify the Setup
-
-#### Test IRSA Configuration
-```bash
-# Verify service account has correct annotation
-kubectl get sa aws-api-mcp-sa -n default -o yaml
-
-# Test AWS access with a temporary pod
-kubectl run aws-cli-test \
-  --image=amazon/aws-cli \
-  --rm -it --restart=Never \
-  --overrides='{"spec":{"serviceAccountName":"aws-api-mcp-sa"}}' \
-  -n default \
-  -- sts get-caller-identity
-
-# Should return the IAM role ARN, not the node's role
-```
-
-### What Information is Available
-
-Container Insights captures:
-- **OOM Events**: Exact timestamp when pod was killed
-- **Exit Codes**: 137 indicates SIGKILL (often OOM)
-- **Memory Metrics**: Memory usage leading up to OOM
-- **Container State**: Last state before termination
-- **Restart Count**: Number of times pod has restarted
-- **Resource Limits**: Configured memory limits
-- **Memory Working Set**: Actual memory usage over time
-
-
-## Troubleshooting
-
-### MCP Server Not Responding
-
-1. Check pod status:
-   ```bash
-   kubectl get pods -l app=aws-api-mcp-server
-   kubectl logs -l app=aws-api-mcp-server
-   ```
-
-2. Verify IRSA is working:
-   ```bash
-   kubectl exec -it deploy/aws-api-mcp-server -- aws sts get-caller-identity
-   ```
-
-### Permission Issues
-
-1. Check IAM role is attached:
-   ```bash
-   kubectl get sa aws-api-mcp-sa -o yaml
-   ```
-
-2. Verify IAM role has correct policies:
-   ```bash
-   aws iam list-attached-role-policies --role-name aws-api-mcp-role
-   ```
-
-## Security Considerations
-
-- The MCP server has **read-only** access to AWS services
-- IRSA ensures pods use temporary credentials
-- No AWS credentials are stored in the cluster
-- Access is scoped to specific service account
-
-## Next Steps
-
-1. Create evaluation tests for AWS scenarios:
-   - ELB failure analysis
-   - EC2 network issues
-   - RDS performance problems
-   - IAM permission debugging
-   - Cost analysis queries
-
-2. Enhance Holmes toolsets to leverage AWS data
-
-3. Add more AWS service integrations as needed

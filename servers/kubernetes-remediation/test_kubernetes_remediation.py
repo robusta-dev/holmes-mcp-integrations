@@ -182,7 +182,7 @@ def test_read_path_hard_denies_credential_roots_even_with_root_allowed(path):
 @pytest.mark.parametrize(
     "path, rule",
     [
-        ("/root/.aws/credentials", ".aws"),  # aws-multi-account aws_auth.py writes here
+        ("/root/.aws/credentials", ".aws"),
         ("/home/app/.aws/config", ".aws"),
         ("/root/.config/gcloud/application_default_credentials.json", ".config/gcloud"),
         ("/home/x/.azure/accessTokens.json", ".azure"),

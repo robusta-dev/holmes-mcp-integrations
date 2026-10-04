@@ -79,57 +79,32 @@ generate_holmes_config() {
     
     log_info "Generating Holmes config: $output_file"
     
-    # Generate YAML content
     cat > "$output_file" <<EOF
 holmes:
   mcpAddons:
     aws:
-      config:
-        readOnlyMode: true
-        region: ${DEFAULT_REGION}
       enabled: true
+      config:
+        region: ${DEFAULT_REGION}
       multiAccount:
         enabled: true
-        llm_account_descriptions: |
-          You must use the --profile flag to specify the account to use.
-EOF
-    
-    # Add LLM account descriptions
-    local i=0
-    while [ $i -lt $ACCOUNT_COUNT ]; do
-        local profile=$(yq e ".target_accounts[$i].profile" "$CONFIG_FILE")
-        local desc=$(yq e ".target_accounts[$i].description" "$CONFIG_FILE")
-        cat >> "$output_file" <<EOF
-          Example: --profile ${profile} - ${desc}
-EOF
-        i=$((i+1))
-    done
-    
-    # Add profiles section
-    cat >> "$output_file" <<EOF
         profiles:
 EOF
     
-    # Add profiles
-    i=0
+    local i=0
     while [ $i -lt $ACCOUNT_COUNT ]; do
         local profile=$(yq e ".target_accounts[$i].profile" "$CONFIG_FILE")
         local account_id=$(yq e ".target_accounts[$i].account_id" "$CONFIG_FILE")
-        local role_arn="arn:aws:iam::${account_id}:role/${IAM_ROLE_NAME}"
+        local desc=$(yq e ".target_accounts[$i].description" "$CONFIG_FILE")
         
         cat >> "$output_file" <<EOF
           ${profile}:
             account_id: "${account_id}"
-            role_arn: ${role_arn}
+            role_arn: arn:aws:iam::${account_id}:role/${IAM_ROLE_NAME}
+            description: "${desc}"
 EOF
         i=$((i+1))
     done
-    
-    # Add service account config
-    cat >> "$output_file" <<EOF
-      serviceAccount:
-        create: true
-EOF
     
     log_success "Generated Holmes config: $output_file"
 }

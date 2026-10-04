@@ -9,8 +9,7 @@ holmes-mcp-integrations/
 ├── build-all-mcp-servers.sh      # Build script for all MCP servers
 ├── mcp_base_image/               # Base Docker image for MCP servers
 └── servers/                      # MCP server implementations
-    ├── aws/                      # AWS API MCP Server
-    ├── aws-multi-account/        # AWS Multi-Account MCP Server
+    ├── aws/                      # IAM setup scripts for the hosted AWS MCP Server (no image)
     ├── azure/                    # Azure CLI MCP Server
     ├── confluence/               # Confluence MCP Server (external image)
     ├── gcp/
