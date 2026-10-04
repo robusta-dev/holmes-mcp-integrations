@@ -1,0 +1,32 @@
+clusters:
+  - name: cluster-name-here
+    region: us-east-2
+    account_id: "1111111111"
+    oidc_issuer_id: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+
+  - name: cluster-2-name
+    region: us-east-2
+    account_id: "1111111111"
+    oidc_issuer_id: CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+# Target accounts to access from any cluster above
+target_accounts:
+  - profile: dev
+    account_id: "1111111111"
+    description: "Development account"
+    
+  - profile: prod
+    account_id: "22222222"
+    description: "Production account"
+
+
+# Kubernetes configuration (same across all clusters)
+kubernetes:
+  namespace: monitoring
+  service_account: aws-api-mcp-sa
+
+# IAM configuration
+iam:
+  role_name: EKSMultiAccountMCPRole
+  policy_name: MCPReadOnlyPolicy
+  session_duration: 3600
