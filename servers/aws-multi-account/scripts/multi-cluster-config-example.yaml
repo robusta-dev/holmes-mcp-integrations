@@ -21,9 +21,11 @@ target_accounts:
 
 
 # Kubernetes configuration (same across all clusters)
+# service_account is the Holmes service account:
+# <release>-holmes-service-account for the Holmes chart, robusta-holmes-service-account for Robusta
 kubernetes:
   namespace: monitoring
-  service_account: aws-api-mcp-sa
+  service_account: holmes-holmes-service-account
 
 # IAM configuration
 iam:

@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# IRSA Setup Script for Holmes AWS MCP Server on EKS
-# This script creates the necessary IAM role and service account for IRSA
-# Usage: ./setup-irsa.sh --cluster-name <name> --region <region> --namespace <namespace>
+# IRSA Setup Script for Holmes' access to the hosted AWS MCP Server on EKS
+# This script creates the IAM policy and role trusted by the Holmes service account
+# Usage: ./setup-irsa.sh --cluster-name <name> --region <region> --namespace <namespace> --service-account <name>
 
 set -e
 
 # Default values
 DEFAULT_NAMESPACE="default"
-SERVICE_ACCOUNT_NAME="aws-api-mcp-sa"
+SERVICE_ACCOUNT_NAME="holmes-holmes-service-account"
 IAM_POLICY_NAME="holmes-aws-mcp-policy"
 IAM_ROLE_BASE="holmes-aws-mcp-role"
 
@@ -17,20 +17,22 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Setup IRSA (IAM Roles for Service Accounts) for Holmes AWS MCP Server on EKS.
+Setup IRSA (IAM Roles for Service Accounts) so Holmes can call the hosted AWS MCP Server from EKS.
 
 Required Options:
     -c, --cluster-name NAME     EKS cluster name
     -r, --region REGION         AWS region (e.g., us-east-1)
 
 Optional Options:
-    -n, --namespace NAMESPACE   Kubernetes namespace (default: $DEFAULT_NAMESPACE)
+    -n, --namespace NAMESPACE   Kubernetes namespace where Holmes runs (default: $DEFAULT_NAMESPACE)
+    -s, --service-account NAME  Holmes service account (default: $SERVICE_ACCOUNT_NAME,
+                                use robusta-holmes-service-account for the Robusta chart)
     --role-base-name NAME       Base name for IAM role (default: $IAM_ROLE_BASE)
     -h, --help                  Show this help message
 
 Examples:
     $0 --cluster-name prod-cluster --region us-east-1
-    $0 -c dev-cluster -r us-west-2 -n holmes
+    $0 -c dev-cluster -r us-west-2 -n robusta -s robusta-holmes-service-account
     $0 --cluster-name staging --region eu-west-1 --namespace monitoring --role-base-name custom-holmes-role
 
 EOF
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -n|--namespace)
             NAMESPACE="$2"
+            shift 2
+            ;;
+        -s|--service-account)
+            SERVICE_ACCOUNT_NAME="$2"
             shift 2
             ;;
         --role-base-name)
@@ -84,27 +90,11 @@ if [ -z "$AWS_REGION" ]; then
     usage 1
 fi
 
-echo "🚀 Setting up IRSA for Holmes AWS MCP Server"
+echo "🚀 Setting up IRSA for Holmes AWS MCP access"
 echo "   Cluster: $CLUSTER_NAME"
 echo "   Region: $AWS_REGION"
 echo "   Namespace: $NAMESPACE"
 echo "   Service Account: $SERVICE_ACCOUNT_NAME"
-echo ""
-
-# Step 1: Check if service account already exists
-echo "🔍 Checking if ServiceAccount already exists..."
-if kubectl get sa "$SERVICE_ACCOUNT_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-    echo ""
-    echo "❌ ServiceAccount '$SERVICE_ACCOUNT_NAME' already exists in namespace '$NAMESPACE'"
-    echo ""
-    echo "   This script requires a clean setup. Please delete the existing ServiceAccount first:"
-    echo ""
-    echo "   kubectl delete sa $SERVICE_ACCOUNT_NAME -n $NAMESPACE"
-    echo ""
-    echo "   After deletion, run this script again."
-    exit 1
-fi
-echo "✅ ServiceAccount does not exist, proceeding with setup"
 echo ""
 
 # Get AWS account ID
@@ -243,49 +233,28 @@ ROLE_ARN=$(aws iam get-role --role-name "$IAM_ROLE_NAME" --query 'Role.Arn' --ou
 echo "   Role ARN: $ROLE_ARN"
 echo ""
 
-# Step 4: Create the Kubernetes service account
-echo "🎫 Creating Kubernetes ServiceAccount..."
-
-# Create namespace if it doesn't exist
-if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
-    echo "   Creating namespace: $NAMESPACE"
-    kubectl create namespace "$NAMESPACE"
-fi
-
-# Create the service account with annotation
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: $SERVICE_ACCOUNT_NAME
-  namespace: $NAMESPACE
-  annotations:
-    eks.amazonaws.com/role-arn: $ROLE_ARN
-EOF
-
-echo "✅ ServiceAccount created with IRSA annotation"
-echo ""
-
 # Verify the setup
 echo "📋 Setup Summary:"
 echo "   ✅ IAM Policy: $IAM_POLICY_NAME"
 echo "   ✅ IAM Role: $IAM_ROLE_NAME"
-echo "   ✅ ServiceAccount: $SERVICE_ACCOUNT_NAME (namespace: $NAMESPACE)"
+echo "   ✅ Trusted ServiceAccount: $SERVICE_ACCOUNT_NAME (namespace: $NAMESPACE)"
 echo "   ✅ Role ARN: $ROLE_ARN"
 echo ""
 
 echo "🎉 IRSA setup complete!"
 echo ""
 echo "📋 Next steps:"
-echo "1. Update your Helm values to use this service account:"
+echo "1. Annotate the Holmes service account in your Helm values and enable the addon:"
 echo "   serviceAccount:"
-echo "     name: $SERVICE_ACCOUNT_NAME"
-echo "     create: false  # Already created by this script"
+echo "     annotations:"
+echo "       eks.amazonaws.com/role-arn: $ROLE_ARN"
+echo "   mcpAddons:"
+echo "     aws:"
+echo "       enabled: true"
+echo "       config:"
+echo "         region: $AWS_REGION"
 echo ""
-echo "2. Deploy the AWS MCP server with Helm"
+echo "2. Deploy Holmes with Helm (nest the values under holmes: for the Robusta chart)"
 echo ""
-echo "💡 To verify the setup, run:"
-echo "   kubectl get sa $SERVICE_ACCOUNT_NAME -n $NAMESPACE -o yaml"
-echo ""
-echo "   Test with AWS CLI pod:"
-echo "   kubectl run aws-cli-test --image=amazon/aws-cli --rm -it --restart=Never --overrides='{\"spec\":{\"serviceAccountName\":\"$SERVICE_ACCOUNT_NAME\"}}' -n $NAMESPACE -- sts get-caller-identity"
+echo "💡 To verify the setup after deploying, run:"
+echo "   kubectl exec -n $NAMESPACE deploy/holmes-holmes -- python -c \"import boto3; print(boto3.client('sts').get_caller_identity()['Arn'])\""
