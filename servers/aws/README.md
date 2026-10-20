@@ -16,13 +16,13 @@ Holmes (SigV4 with IRSA / profiles) → https://aws-mcp.<region>.api.aws/mcp →
   ```bash
   ./setup-irsa.sh --cluster-name my-cluster --region us-east-1 --namespace holmes --service-account holmes-holmes-service-account
   ```
-- **`scripts/setup-multi-account-iam.sh`** - Multi-account: creates OIDC providers and roles in each target account, trusting the Holmes service account of every listed cluster, and writes `holmes_config.yaml` with the `mcpAddons.aws.multiAccount` values.
+- **`../aws-multi-account/scripts/setup-multi-account-iam.sh`** - Multi-account: creates OIDC providers and roles in each target account, trusting the Holmes service account of every listed cluster, and writes `holmes_config.yaml` with the `mcpAddons.aws.multiAccount` values.
   ```bash
-  ./scripts/setup-multi-account-iam.sh setup my-config.yaml ./aws-mcp-iam-policy.json
-  ./scripts/setup-multi-account-iam.sh verify my-config.yaml
-  ./scripts/setup-multi-account-iam.sh teardown my-config.yaml
+  ../aws-multi-account/scripts/setup-multi-account-iam.sh setup my-config.yaml ./aws-mcp-iam-policy.json
+  ../aws-multi-account/scripts/setup-multi-account-iam.sh verify my-config.yaml
+  ../aws-multi-account/scripts/setup-multi-account-iam.sh teardown my-config.yaml
   ```
-  Requires `aws`, `jq` and `yq`; see `scripts/multi-cluster-config-example.yaml` for the config format.
+  Requires `aws`, `jq` and `yq`; see `../aws-multi-account/scripts/multi-cluster-config-example.yaml` for the config format.
 
 The Holmes service account is `<release>-holmes-service-account` for the Holmes chart and `robusta-holmes-service-account` for the Robusta chart.
 
