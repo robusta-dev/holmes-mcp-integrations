@@ -1792,8 +1792,8 @@ def test_gpu_diagnostics_ib_check_reports_only_non_zero_hca_counters(tmp_path):
     host_stubs = (
         'chroot() { shift; "$@"; }; nsenter() { shift 3; "$@"; }; '
         'ibstat() { echo "State: Active"; }; '
-        'ethtool() { [ "$2" = ibp1 ] && printf "rx_packets: 42\\ntx_errors: 0\\n" '
-        '|| echo "rx_errors: 0"; }; '
+        'ethtool() { echo "NIC statistics:"; [ "$2" = ibp1 ] '
+        '&& printf "     rx_packets: 42\\n     tx_errors: 0\\n" || echo "     rx_errors: 0"; }; '
     )
     script = k.HOST_CHECKS["ib"].replace("/host/", f"{tmp_path}/")
     output = subprocess.run(

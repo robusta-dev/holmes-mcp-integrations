@@ -610,10 +610,10 @@ HOST_CHECKS: Dict[str, str] = {
         "|| echo 'fabricmanager log not found at /var/log/fabricmanager.log'"
     ),
     "kubelet_journal": (
-        "chroot /host journalctl -u kubelet --since '-2h' --no-pager 2>&1 | tail -n 200"
+        "chroot /host journalctl -u kubelet --since '-2h' -n 200 --no-pager 2>&1"
     ),
     "containerd_journal": (
-        "chroot /host journalctl -u containerd --since '-2h' --no-pager 2>&1 | tail -n 200"
+        "chroot /host journalctl -u containerd --since '-2h' -n 200 --no-pager 2>&1"
     ),
     "crictl": (
         "echo '== crictl ps -a =='; chroot /host crictl ps -a 2>&1; "
@@ -625,7 +625,8 @@ HOST_CHECKS: Dict[str, str] = {
         "for net in /host/sys/class/infiniband/*/device/net/*; do "
         "[ -e \"$net\" ] || continue; iface=$(basename \"$net\"); "
         "echo; echo \"== ethtool -S $iface (non-zero counters) ==\"; "
-        "chroot /host nsenter -t 1 -n ethtool -S \"$iface\" 2>&1 | grep -v ': 0$' "
+        "chroot /host nsenter -t 1 -n ethtool -S \"$iface\" 2>&1 "
+        "| grep -v -e ': 0$' -e '^NIC statistics:$' "
         "|| echo 'all counters are zero'; done"
     ),
     # which host processes hold /dev/nvidia* open (zombie processes keeping
