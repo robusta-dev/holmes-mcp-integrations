@@ -38,7 +38,7 @@ spec:
         # Pre-approved read-only in-container binaries for
         # run_preapproved_kubectl_exec_command (auto-approved)
         - name: KUBECTL_PREAPPROVED_EXEC_BINARIES
-          value: "ps,top,df,ls,netstat,ss"
+          value: "ps,top,df,ls,netstat,ss,nvidia-smi,dmesg"
 
         # Pre-approved troubleshooting images for run_preapproved_diagnostic_image (auto-approved)
         - name: KUBECTL_DIAGNOSTIC_IMAGES

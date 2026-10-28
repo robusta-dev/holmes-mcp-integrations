@@ -55,6 +55,7 @@ import fnmatch
 import posixpath
 import re
 import uuid
+from functools import partial
 from typing import Any, Dict, List, Optional
 import sys
 import uvicorn
@@ -157,7 +158,7 @@ _BOOLEAN_SHORT_FLAGS = frozenset("ARhiqtw")
 # process environments.
 PREAPPROVED_EXEC_BINARIES = set(
     _split_csv(
-        os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss")
+        os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss,nvidia-smi,dmesg")
     )
 )
 
@@ -1433,11 +1434,45 @@ def _ps_argv_reason(args: List[str]) -> Optional[str]:
     return None
 
 
-_PREAPPROVED_EXEC_ARGV_CHECKERS = {"ps": _ps_argv_reason}
+# Argument allowlists: argv must fully match one form.
+_EXEC_ARGV_ALLOWLISTS = {
+    "nvidia-smi": re.compile(
+        r"( -L)?"
+        r"| -q( -d [A-Z_,]+| -i \d+)*"
+        r"| --query-[a-z-]+=[a-z0-9_.,]+ --format=csv(,noheader|,nounits)*( -i \d+)?"
+        r"| nvlink -[se]( -i \d+)?"
+        r"| topo -m"
+    ),
+    "dmesg": re.compile(r"( -T| -k| --level=[a-z,]+)*"),
+}
+
+_EXEC_ARGV_ALLOWED_FORMS = {
+    "nvidia-smi": "no arguments, `-L`, `-q [-d SECTIONS] [-i N]`, "
+    "`--query-*=FIELDS --format=csv [-i N]`, `nvlink -s|-e [-i N]`, `topo -m`",
+    "dmesg": "any of `-T`, `-k`, `--level=LEVELS`",
+}
+
+
+def _allowlisted_argv_reason(binary: str, args: List[str]) -> Optional[str]:
+    spaced_argv = "".join(f" {arg}" for arg in args)
+    args_are_single_tokens = len(spaced_argv.split()) == len(args)
+    if args_are_single_tokens and _EXEC_ARGV_ALLOWLISTS[binary].fullmatch(spaced_argv):
+        return None
+    return (
+        f"'{binary}' arguments {args!r} are not on the exec argument allowlist "
+        f"({_EXEC_ARGV_ALLOWED_FORMS[binary]}); {_PS_FALLBACK}."
+    )
+
+
+_PREAPPROVED_EXEC_ARGV_CHECKERS = {
+    "ps": _ps_argv_reason,
+    **{binary: partial(_allowlisted_argv_reason, binary) for binary in _EXEC_ARGV_ALLOWLISTS},
+}
 
 PREAPPROVED_EXEC_ARGV_POLICY = {
     "ps": "BSD 'e' (environment display) refused in every spelling; unrecognised "
     "options refused; -e with user/group/session/tty selectors refused",
+    **{binary: f"allowlist only: {forms}" for binary, forms in _EXEC_ARGV_ALLOWED_FORMS.items()},
 }
 
 
@@ -1542,7 +1577,7 @@ def read_file_from_container(
     description=(
         "AUTO-APPROVED (runs immediately, no human needed). Run one of the "
         "operator's pre-approved read-only diagnostic binaries INSIDE a container "
-        "via `kubectl exec` (e.g. ps/top/df/ls/netstat/ss). Pass the pod, "
+        "via `kubectl exec` (e.g. ps/top/df/ls/netstat/ss/nvidia-smi/dmesg). Pass the pod, "
         "namespace, optional container, and the in-container command as a list; "
         "the server builds the `kubectl exec ... -- <command>` invocation itself.\n\n"
         "The command's binary (command[0]) must be on the allowlist; if it isn't "
@@ -1550,7 +1585,9 @@ def read_file_from_container(
         "(which requires human approval). `ps` additionally may not display "
         "process environments: the BSD `e` flag (`ps auxe`, `ps -p 1 e`) and "
         "`-e` combined with a user/group/tty selector are refused — use "
-        "`ps aux`, `ps -ef` or `ps -eo pid,user,etime,args`. To read a file use "
+        "`ps aux`, `ps -ef` or `ps -eo pid,user,etime,args`. `nvidia-smi` accepts "
+        f"only {_EXEC_ARGV_ALLOWED_FORMS['nvidia-smi']}; `dmesg` accepts only "
+        f"{_EXEC_ARGV_ALLOWED_FORMS['dmesg']}. To read a file use "
         "read_file_from_container instead of `cat`.\n\n"
         "Example: run_preapproved_kubectl_exec_command(pod=\"api-xxx\", namespace=\"prod\", command=[\"ps\",\"aux\"])"
     ),

@@ -451,6 +451,8 @@ def test_read_file_refusal_is_returned_over_mcp():
         ["ls", "-la", "/app"],
         ["netstat", "-tlnp"],
         ["ss", "-tlnp"],
+        ["nvidia-smi", "-L"],
+        ["dmesg", "-T"],
     ],
 )
 def test_preapproved_binary_allowed(command):
@@ -703,9 +705,111 @@ def test_preapproved_exec_still_runs_safe_ps_forms():
     )
 
 
-def test_get_config_exposes_exec_argv_policy():
+# ── run_preapproved_kubectl_exec_command: nvidia-smi / dmesg allowlists (ROB-1675)
+
+NVIDIA_SMI_SAFE_FORMS = [
+    ["nvidia-smi"],
+    ["nvidia-smi", "-L"],
+    ["nvidia-smi", "-q"],
+    ["nvidia-smi", "-q", "-d", "ECC"],
+    ["nvidia-smi", "-q", "-d", "TEMPERATURE,POWER,CLOCK", "-i", "0"],
+    ["nvidia-smi", "-q", "-i", "3", "-d", "PAGE_RETIREMENT"],
+    ["nvidia-smi", "--query-gpu=name,temperature.gpu,utilization.gpu", "--format=csv"],
+    ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+    ["nvidia-smi", "--query-gpu=pci.bus_id", "--format=csv", "-i", "1"],
+    ["nvidia-smi", "nvlink", "-s"],
+    ["nvidia-smi", "nvlink", "-e", "-i", "0"],
+    ["nvidia-smi", "topo", "-m"],
+]
+
+NVIDIA_SMI_REFUSED_FORMS = [
+    ["nvidia-smi", "-r"],
+    ["nvidia-smi", "--gpu-reset"],
+    ["nvidia-smi", "-r", "-i", "0"],
+    ["nvidia-smi", "-pm", "1"],
+    ["nvidia-smi", "-pl", "200"],
+    ["nvidia-smi", "-e", "0"],
+    ["nvidia-smi", "-c", "3"],
+    ["nvidia-smi", "-lgc", "1000"],
+    ["nvidia-smi", "nvlink", "--reset"],
+    ["nvidia-smi", "nvlink", "-r"],
+    ["nvidia-smi", "-q", "-l", "1"],
+    ["nvidia-smi", "-q", "-d", "ECC", "-r"],
+    ["nvidia-smi", "-L", "-r"],
+    ["nvidia-smi", "--query-gpu=name"],
+    ["nvidia-smi", "--query-gpu=name", "--format=csv", "-f", "/tmp/out"],
+    ["nvidia-smi", "topo", "-m", "-r"],
+    ["nvidia-smi", "-q -r"],
+    ["nvidia-smi", "-L", ""],
+]
+
+DMESG_SAFE_FORMS = [
+    ["dmesg"],
+    ["dmesg", "-T"],
+    ["dmesg", "-k"],
+    ["dmesg", "--level=err,warn"],
+    ["dmesg", "-T", "--level=err"],
+    ["dmesg", "-k", "-T"],
+]
+
+DMESG_REFUSED_FORMS = [
+    ["dmesg", "-C"],
+    ["dmesg", "-c"],
+    ["dmesg", "--clear"],
+    ["dmesg", "-D"],
+    ["dmesg", "-E"],
+    ["dmesg", "-n", "1"],
+    ["dmesg", "-w"],
+    ["dmesg", "-T", "-C"],
+    ["dmesg", "--level=err", "-c"],
+    ["dmesg", "-Tc"],
+    ["dmesg", "-T -C"],
+]
+
+
+@pytest.mark.parametrize("command", NVIDIA_SMI_SAFE_FORMS + DMESG_SAFE_FORMS)
+def test_allowlisted_argv_forms_allowed(command):
+    assert k.preapproved_exec_argv_reason(command) is None
+
+
+@pytest.mark.parametrize("command", NVIDIA_SMI_REFUSED_FORMS + DMESG_REFUSED_FORMS)
+def test_argv_outside_allowlist_refused(command):
+    reason = k.preapproved_exec_argv_reason(command)
+    assert reason is not None
+    assert "run_kubectl_command" in reason
+
+
+def test_argv_allowlist_refusal_lists_allowed_forms():
+    assert "topo -m" in k.preapproved_exec_argv_reason(["nvidia-smi", "-r"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["nvidia-smi", "-r"], ["nvidia-smi", "nvlink", "--reset"], ["dmesg", "-C"]],
+)
+def test_preapproved_exec_refuses_destructive_gpu_and_kernel_args_without_executing(command):
+    with patch.object(k, "_run_kubectl") as m:
+        result = k.run_preapproved_kubectl_exec_command(
+            pod="gpu-worker", namespace="prod", command=command
+        )
+    m.assert_not_called()
+    assert result["success"] is False
+
+
+def test_preapproved_exec_runs_allowlisted_nvidia_smi():
+    with patch.object(k, "_run_kubectl", return_value={"success": True}) as m:
+        k.run_preapproved_kubectl_exec_command(
+            pod="gpu-worker", namespace="prod", command=["nvidia-smi", "-q", "-d", "ECC"]
+        )
+    m.assert_called_once_with(
+        ["exec", "gpu-worker", "-n", "prod", "--", "nvidia-smi", "-q", "-d", "ECC"]
+    )
+
+
+@pytest.mark.parametrize("binary", ["ps", "nvidia-smi", "dmesg"])
+def test_get_config_exposes_exec_argv_policy(binary):
     cfg = k.get_remediation_mcp_config()
-    assert "ps" in cfg["preapproved_exec_argv_policy"]
+    assert binary in cfg["preapproved_exec_argv_policy"]
 
 
 def _procps_available() -> bool:
