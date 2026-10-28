@@ -1758,6 +1758,53 @@ def test_gpu_diagnostics_pci_link_validates_bus_id():
     assert "{bus_id}" not in script
 
 
+@pytest.mark.parametrize(
+    "check, command_fragment",
+    [
+        ("nvlink_status", "nvsmi nvlink -s"),
+        ("kubelet_journal", "chroot /host journalctl -u kubelet --since"),
+        ("containerd_journal", "chroot /host journalctl -u containerd --since"),
+        ("crictl", "chroot /host crictl ps -a"),
+        ("crictl", "chroot /host crictl images"),
+        ("ib", "chroot /host ibstat"),
+        ("ib", "chroot /host nsenter -t 1 -n ethtool -S"),
+        ("fabric_manager_log", "/host/var/log/fabricmanager.log"),
+    ],
+)
+def test_gpu_diagnostics_additional_host_checks(check, command_fragment):
+    result, args = _run_gpu_check(node="n1", checks=[check])
+    assert result["success"] is True
+    script = _in_pod_script(args)
+    assert f"===== {check} =====" in script
+    assert command_fragment in script
+
+
+def test_gpu_diagnostics_full_catalog_script_is_valid_shell():
+    _, args = _run_gpu_check(
+        node="n1", checks=sorted(k.NODE_CHECKS), pid=1, pci_bus_id="01:00.0"
+    )
+    assert subprocess.run(["sh", "-n", "-c", _in_pod_script(args)]).returncode == 0
+
+
+def test_gpu_diagnostics_ib_check_reports_only_non_zero_hca_counters(tmp_path):
+    for iface in ("ibp1", "ibp2"):
+        (tmp_path / f"sys/class/infiniband/{iface}-dev/device/net/{iface}").mkdir(parents=True)
+    host_stubs = (
+        'chroot() { shift; "$@"; }; nsenter() { shift 3; "$@"; }; '
+        'ibstat() { echo "State: Active"; }; '
+        'ethtool() { echo "NIC statistics:"; [ "$2" = ibp1 ] '
+        '&& printf "     rx_packets: 42\\n     tx_errors: 0\\n" || echo "     rx_errors: 0"; }; '
+    )
+    script = k.HOST_CHECKS["ib"].replace("/host/", f"{tmp_path}/")
+    output = subprocess.run(
+        ["sh", "-c", host_stubs + script], capture_output=True, text=True
+    ).stdout
+    assert "State: Active" in output
+    assert "rx_packets: 42" in output
+    assert "tx_errors: 0" not in output
+    assert "== ethtool -S ibp2 (non-zero counters) ==\nall counters are zero" in output
+
+
 def test_gpu_diagnostics_dcgm_off_by_default():
     # DCGM is opt-in: without DCGM_ENABLED=true the dcgm_* checks are refused
     # (nothing looked up, nothing launched) and the refusal names the toggle.
