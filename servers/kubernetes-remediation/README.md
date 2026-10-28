@@ -34,7 +34,7 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 | `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts, credential directories/files and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied; a path that cannot be canonicalized is refused. See [File-read path policy](#file-read-path-policy). |
 | `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist (`command[0]`, exact) plus a per-binary argument policy: `ps` may not display process environments. |
 | `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped, not host-networked) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag) **and a target policy** — see [Diagnostic-pod target policy](#diagnostic-pod-target-policy). |
-| `run_gpu_node_diagnostics` | Run one or more **named** GPU/driver checks (single pod for all of them) on a specific node: `overview`, `details`, `throttling`, `utilization_samples`, `ecc`, `page_retirement`, `row_remapper`, `compute_processes`, `kernel_gpu_errors`, `kernel_log_journal`, `driver_info`, `pci`, `pci_link`, `fabric_manager`, `gpu_device_holders`, `process_info`, plus opt-in `dcgm_*`. The pod is pinned to the node and runs the **node's own binaries** through the host filesystem (mounted read-only at `/host`) — no custom image is involved beyond a shell (busybox); `nvidia-smi` is resolved from the host PATH or the GPU Operator's containerized-driver root. | Check-name catalog — every command string is server-owned; the caller picks only the node, check names, and strictly validated `pid`/`pci_bus_id`/`dcgm_diag_level` scalars. See [GPU node diagnostics](#gpu-node-diagnostics). |
+| `run_gpu_node_diagnostics` | Run one or more **named** GPU/driver checks (single pod for all of them) on a specific node: `overview`, `details`, `throttling`, `utilization_samples`, `ecc`, `page_retirement`, `row_remapper`, `compute_processes`, `nvlink_status`, `kernel_gpu_errors`, `kernel_log_journal`, `driver_info`, `pci`, `pci_link`, `fabric_manager`, `fabric_manager_log`, `kubelet_journal`, `containerd_journal`, `crictl`, `ib`, `gpu_device_holders`, `process_info`, plus opt-in `dcgm_*`. The pod is pinned to the node and runs the **node's own binaries** through the host filesystem (mounted read-only at `/host`) — no custom image is involved beyond a shell (busybox); `nvidia-smi` is resolved from the host PATH or the GPU Operator's containerized-driver root. | Check-name catalog — every command string is server-owned; the caller picks only the node, check names, and strictly validated `pid`/`pci_bus_id`/`dcgm_diag_level` scalars. See [GPU node diagnostics](#gpu-node-diagnostics). |
 | `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
 
 `run_preapproved_kubectl_exec_command` deliberately excludes `cat` (use
@@ -176,17 +176,20 @@ shell) is privileged with `hostPID` and the host root mounted **read-only** at
 `/host`, the same shape as `kubectl debug node/`. `nvidia-smi` is resolved
 from the host PATH, falling back to `/run/nvidia/driver` for GPU Operator
 clusters that run the containerized driver; `dmesg`, `journalctl`, `lspci`,
-`modinfo` and `systemctl` run via `chroot /host` too.
+`modinfo`, `systemctl`, `crictl` and `ibstat` run via `chroot /host` too, and
+`ethtool` additionally enters the host network namespace (`nsenter -t 1 -n`)
+to read the InfiniBand HCA counters.
 
 The caller selects checks **by name** (several per call — they all run in the
 same pod, one `===== <check> =====` section per check in the output). The
 catalog covers the nvidia-smi surface (driver/temperature/power overview,
 throttle reasons, ECC counts, retired pages / row remapping,
-GPU-memory-holding processes, ~30s utilization sampling) and the kernel side
-(dmesg XID/NVRM errors, kernel journal, loaded-vs-on-disk-vs-running driver
-version — the "Driver/library version mismatch" triple check — PCIe presence
-and link state, fabric-manager status, `/dev/nvidia*` holders, per-process
-inspection).
+GPU-memory-holding processes, ~30s utilization sampling, NVLink link state)
+and the host side (dmesg XID/NVRM errors, kernel journal, loaded-vs-on-disk-vs-running
+driver version — the "Driver/library version mismatch" triple check — PCIe
+presence and link state, fabric-manager status and log, kubelet and containerd
+journals, `crictl` containers and images, InfiniBand `ibstat` and HCA
+counters, `/dev/nvidia*` holders, per-process inspection).
 
 The optional `dcgm_*` checks (`DCGM_ENABLED=true`, off by default) follow the
 same principle: `dcgmi` runs from the host via `chroot /host` like everything

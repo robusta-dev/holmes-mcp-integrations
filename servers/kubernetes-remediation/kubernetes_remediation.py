@@ -540,6 +540,7 @@ GPU_CHECKS: Dict[str, str] = {
     "compute_processes": (
         "nvsmi --query-compute-apps=pid,process_name,used_memory --format=csv"
     ),
+    "nvlink_status": "nvsmi nvlink -s",
 }
 
 # DCGM check commands — the host's own dcgmi (resolved by dcgmi_run in the
@@ -602,6 +603,30 @@ HOST_CHECKS: Dict[str, str] = {
         "|| { echo '--- systemctl unavailable, falling back to process check ---'; "
         "ps 2>/dev/null | grep -i 'fabricmanager' | grep -v grep "
         "|| echo 'nv-fabricmanager process not found'; }"
+    ),
+    "fabric_manager_log": (
+        "tail -n 200 /host/var/log/fabricmanager.log 2>/dev/null "
+        "|| tail -n 200 /host/run/nvidia/driver/var/log/fabricmanager.log 2>/dev/null "
+        "|| echo 'fabricmanager log not found at /var/log/fabricmanager.log'"
+    ),
+    "kubelet_journal": (
+        "chroot /host journalctl -u kubelet --since '-2h' --no-pager 2>&1 | tail -n 200"
+    ),
+    "containerd_journal": (
+        "chroot /host journalctl -u containerd --since '-2h' --no-pager 2>&1 | tail -n 200"
+    ),
+    "crictl": (
+        "echo '== crictl ps -a =='; chroot /host crictl ps -a 2>&1; "
+        "echo; echo '== crictl images =='; chroot /host crictl images 2>&1"
+    ),
+    # ethtool needs the host network namespace
+    "ib": (
+        "echo '== ibstat =='; chroot /host ibstat 2>&1 || echo 'ibstat unavailable on host'; "
+        "for net in /host/sys/class/infiniband/*/device/net/*; do "
+        "[ -e \"$net\" ] || continue; iface=$(basename \"$net\"); "
+        "echo; echo \"== ethtool -S $iface (non-zero counters) ==\"; "
+        "chroot /host nsenter -t 1 -n ethtool -S \"$iface\" 2>&1 | grep -v ': 0$' "
+        "|| echo 'all counters are zero'; done"
     ),
     # which host processes hold /dev/nvidia* open (zombie processes keeping
     # GPU memory allocated after their pod died)
@@ -1875,6 +1900,8 @@ def _build_multi_check_script(names: List[str], commands: Dict[str, str]) -> str
         "- page_retirement: retired pages (pending retirement means the node needs a reboot)\n"
         "- row_remapper: A100/H100-generation remapped-rows state\n"
         "- compute_processes: which processes hold GPU memory\n"
+        "- nvlink_status: nvidia-smi nvlink -s — per-link NVLink state (a real "
+        "link-down vs a latched DCGM NVLink watch)\n"
         "- kernel_gpu_errors: dmesg XID/NVRM errors ('GPU has fallen off the bus', "
         "driver load failures)\n"
         "- kernel_log_journal: last 2h of NVIDIA kernel-journal entries\n"
@@ -1884,6 +1911,12 @@ def _build_multi_check_script(names: List[str], commands: Dict[str, str]) -> str
         "- pci_link: link width/speed for one device — requires pci_bus_id "
         "(e.g. \"01:00.0\", from the `pci` check)\n"
         "- fabric_manager: nvidia-fabricmanager status (NVSwitch/HGX systems)\n"
+        "- fabric_manager_log: last 200 lines of the fabricmanager log file (works "
+        "when it runs without a systemd unit)\n"
+        "- kubelet_journal / containerd_journal: last 2h of the kubelet / containerd "
+        "journal\n"
+        "- crictl: crictl ps -a and crictl images on the node\n"
+        "- ib: ibstat plus non-zero ethtool -S counters of each InfiniBand HCA\n"
         "- gpu_device_holders: host processes holding /dev/nvidia* open "
         "(zombie processes keeping GPU memory allocated)\n"
         "- process_info: inspect one host process — requires pid (from "
