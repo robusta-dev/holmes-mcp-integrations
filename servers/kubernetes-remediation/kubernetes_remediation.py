@@ -616,8 +616,8 @@ HOST_CHECKS: Dict[str, str] = {
         "chroot /host journalctl -u containerd --since '-2h' -n 200 --no-pager 2>&1"
     ),
     "crictl": (
-        "echo '== crictl ps -a =='; chroot /host crictl ps -a 2>&1; "
-        "echo; echo '== crictl images =='; chroot /host crictl images 2>&1"
+        "echo '== crictl ps -a =='; chroot /host crictl ps -a 2>&1 "
+        "&& echo && echo '== crictl images ==' && chroot /host crictl images 2>&1"
     ),
     # ethtool needs the host network namespace
     "ib": (
