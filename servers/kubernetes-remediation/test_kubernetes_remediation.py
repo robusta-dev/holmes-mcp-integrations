@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -804,6 +805,15 @@ def test_preapproved_exec_runs_allowlisted_nvidia_smi():
     m.assert_called_once_with(
         ["exec", "gpu-worker", "-n", "prod", "--", "nvidia-smi", "-q", "-d", "ECC"]
     )
+
+
+def test_disabled_exec_binaries_env_removes_nvidia_smi_and_dmesg():
+    env = {**os.environ, "KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES": "nvidia-smi, dmesg"}
+    result = subprocess.run(
+        [sys.executable, "-c", "import kubernetes_remediation as k; print(sorted(k.PREAPPROVED_EXEC_BINARIES))"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.strip() == str(["df", "ls", "netstat", "ps", "ss", "top"])
 
 
 @pytest.mark.parametrize("binary", ["ps", "nvidia-smi", "dmesg"])

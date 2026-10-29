@@ -160,7 +160,7 @@ PREAPPROVED_EXEC_BINARIES = set(
     _split_csv(
         os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss,nvidia-smi,dmesg")
     )
-)
+) - set(_split_csv(os.getenv("KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES", "")))
 
 # Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
