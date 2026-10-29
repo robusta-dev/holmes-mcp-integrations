@@ -1446,13 +1446,13 @@ _EXEC_ARGV_ALLOWLISTS = {
         r"| nvlink -[se]( -i \d+)?"
         r"| topo -m"
     ),
-    "dmesg": re.compile(r"( -T| -k| --level=[a-z,]+)*"),
+    "dmesg": re.compile(r"( -T| -k| -r| -s \d+| --level=[a-z,]+)*"),
 }
 
 _EXEC_ARGV_ALLOWED_FORMS = {
     "nvidia-smi": "no arguments, `-L`, `-q [-d SECTIONS] [-i N]`, "
     "`--query-*=FIELDS --format=csv [-i N]`, `nvlink -s|-e [-i N]`, `topo -m`",
-    "dmesg": "any of `-T`, `-k`, `--level=LEVELS`",
+    "dmesg": "any of `-T`, `-k`, `-r`, `-s SIZE`, `--level=LEVELS`",
 }
 
 # Custom regexes extend a built-in allowlist rather than replace it.

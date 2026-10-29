@@ -751,6 +751,8 @@ DMESG_SAFE_FORMS = [
     ["dmesg", "--level=err,warn"],
     ["dmesg", "-T", "--level=err"],
     ["dmesg", "-k", "-T"],
+    ["dmesg", "-r"],
+    ["dmesg", "-r", "-s", "65536"],
 ]
 
 DMESG_REFUSED_FORMS = [
@@ -761,6 +763,8 @@ DMESG_REFUSED_FORMS = [
     ["dmesg", "-E"],
     ["dmesg", "-n", "1"],
     ["dmesg", "-w"],
+    ["dmesg", "-s"],
+    ["dmesg", "-s", "big"],
     ["dmesg", "-T", "-C"],
     ["dmesg", "--level=err", "-c"],
     ["dmesg", "-Tc"],

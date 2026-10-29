@@ -65,7 +65,7 @@ one of these forms is refused, so `nvidia-smi -r`/`--gpu-reset`/`-pm`/`-pl`,
 | Binary | Allowed forms |
 |--------|---------------|
 | `nvidia-smi` | no arguments, `-L`, `-q [-d SECTIONS] [-i N]`, `--query-*=FIELDS --format=csv[,noheader][,nounits] [-i N]`, `nvlink -s\|-e [-i N]`, `topo -m` |
-| `dmesg` | any combination of `-T`, `-k`, `--level=LEVELS` |
+| `dmesg` | any combination of `-T`, `-k`, `-r`, `-s SIZE`, `--level=LEVELS` (`-r` and `-s` also work with BusyBox `dmesg`) |
 
 ### Approval-gated fallback (always prompts a human)
 
@@ -112,7 +112,7 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `KUBECTL_DANGEROUS_FLAGS` | *(empty)* | **Additional** blocked flags for `run_kubectl_command`, on top of the built-in non-removable set (server/proxy, TLS, credentials, impersonation, kubeconfig/context/kuberc, `--overrides`, profiling/cache paths) |
 | `KUBECTL_PREAPPROVED_EXEC_BINARIES` | `ps,top,df,ls,netstat,ss,nvidia-smi,dmesg` | `run_preapproved_kubectl_exec_command` binary allowlist (bare names, no patterns) |
 | `KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES` | *(empty)* | binaries removed from `KUBECTL_PREAPPROVED_EXEC_BINARIES`, e.g. `nvidia-smi,dmesg` |
-| `KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS` | `{}` | JSON map of binary to argv regex, e.g. `{"dmesg": "( -r\| -s \\d+)*"}`; the regex must fully match the arguments, each preceded by a space; it pre-approves the binary and extends any built-in allowlist |
+| `KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS` | `{}` | JSON map of binary to argv regex, e.g. `{"ethtool": " -S [a-z0-9]+"}`; the regex must fully match the arguments, each preceded by a space; it pre-approves the binary and extends any built-in allowlist |
 | `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_preapproved_diagnostic_image` allowlist |
 | `KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED` | `true` | master switch for the diagnostic target policy; `false` disables **all** target checks (see warning below) |
 | `KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS` | `false` | allow diagnostic probes to target hosts outside the cluster |
