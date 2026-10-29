@@ -55,6 +55,7 @@ import fnmatch
 import posixpath
 import re
 import uuid
+from functools import partial
 from typing import Any, Dict, List, Optional
 import sys
 import uvicorn
@@ -155,11 +156,15 @@ _BOOLEAN_SHORT_FLAGS = frozenset("ARhiqtw")
 # secrets). Binaries with options that widen what they read get a per-binary
 # argument checker (see _PREAPPROVED_EXEC_ARGV_CHECKERS): `ps` must not print
 # process environments.
-PREAPPROVED_EXEC_BINARIES = set(
+# Binary -> regex its space-prefixed argv must fully match; set by the deployment.
+EXEC_ARGV_ALLOWLISTS: Dict[str, str] = json.loads(
+    os.getenv("KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS", "{}")
+)
+PREAPPROVED_EXEC_BINARIES = (set(
     _split_csv(
         os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss")
     )
-)
+) | set(EXEC_ARGV_ALLOWLISTS)) - set(_split_csv(os.getenv("KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES", "")))
 
 # Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
@@ -1433,11 +1438,31 @@ def _ps_argv_reason(args: List[str]) -> Optional[str]:
     return None
 
 
-_PREAPPROVED_EXEC_ARGV_CHECKERS = {"ps": _ps_argv_reason}
+_EXEC_ARGV_ALLOWLISTS = {
+    binary: re.compile(pattern) for binary, pattern in EXEC_ARGV_ALLOWLISTS.items()
+}
+
+
+def _allowlisted_argv_reason(binary: str, args: List[str]) -> Optional[str]:
+    spaced_argv = "".join(f" {arg}" for arg in args)
+    args_are_single_tokens = len(spaced_argv.split()) == len(args)
+    if args_are_single_tokens and _EXEC_ARGV_ALLOWLISTS[binary].fullmatch(spaced_argv):
+        return None
+    return (
+        f"'{binary}' arguments {args!r} are not on the exec argument allowlist "
+        f"(regex `{EXEC_ARGV_ALLOWLISTS[binary]}`); {_PS_FALLBACK}."
+    )
+
+
+_PREAPPROVED_EXEC_ARGV_CHECKERS = {
+    "ps": _ps_argv_reason,
+    **{binary: partial(_allowlisted_argv_reason, binary) for binary in _EXEC_ARGV_ALLOWLISTS},
+}
 
 PREAPPROVED_EXEC_ARGV_POLICY = {
     "ps": "BSD 'e' (environment display) refused in every spelling; unrecognised "
     "options refused; -e with user/group/session/tty selectors refused",
+    **{binary: f"allowlist only: regex `{pattern}`" for binary, pattern in EXEC_ARGV_ALLOWLISTS.items()},
 }
 
 
@@ -1550,7 +1575,9 @@ def read_file_from_container(
         "(which requires human approval). `ps` additionally may not display "
         "process environments: the BSD `e` flag (`ps auxe`, `ps -p 1 e`) and "
         "`-e` combined with a user/group/tty selector are refused — use "
-        "`ps aux`, `ps -ef` or `ps -eo pid,user,etime,args`. To read a file use "
+        "`ps aux`, `ps -ef` or `ps -eo pid,user,etime,args`. These binaries accept "
+        "only arguments whose space-prefixed argv fully matches their regex: "
+        f"{json.dumps(EXEC_ARGV_ALLOWLISTS)}. To read a file use "
         "read_file_from_container instead of `cat`.\n\n"
         "Example: run_preapproved_kubectl_exec_command(pod=\"api-xxx\", namespace=\"prod\", command=[\"ps\",\"aux\"])"
     ),

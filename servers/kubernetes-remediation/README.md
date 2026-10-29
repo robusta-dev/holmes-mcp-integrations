@@ -32,7 +32,7 @@ carries the LLM instructions. The agent core stays free of command-parsing logic
 | Tool | What it does | Enforced by |
 |------|--------------|-------------|
 | `read_file_from_container` | Read a single file from inside a running container (`kubectl exec -- cat`). | Path allow/deny policy with in-container symlink resolution — secret/token mounts, credential directories/files and the `/proc`, `/sys`, `/dev` pseudo-filesystems are always denied; a path that cannot be canonicalized is refused. See [File-read path policy](#file-read-path-policy). |
-| `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist (`command[0]`, exact) plus a per-binary argument policy: `ps` may not display process environments. |
+| `run_preapproved_kubectl_exec_command` | Run a read-only diagnostic binary (`ps`/`top`/`df`/`ls`/`netstat`/`ss`/`nvidia-smi`/`dmesg`) inside a container. The caller passes `pod`, `namespace`, optional `container`, and `command` as a list; the server builds `kubectl exec ... -- <command>` itself. | Binary allowlist (`command[0]`, exact) plus a per-binary argument policy: `ps` may not display process environments; `nvidia-smi` and `dmesg` accept only allowlisted read-only arguments (see [Exec argument allowlists](#exec-argument-allowlists)). |
 | `run_preapproved_diagnostic_image` | Launch a short-lived, hardened pod (no SA token, no privilege escalation, memory-capped, not host-networked) from a pre-approved troubleshooting image, capture output, auto-delete. | Image allowlist (repo match → pinned tag) **and a target policy** — see [Diagnostic-pod target policy](#diagnostic-pod-target-policy). |
 | `run_gpu_node_diagnostics` | Run one or more **named** GPU/driver checks (single pod for all of them) on a specific node: `overview`, `details`, `throttling`, `utilization_samples`, `ecc`, `page_retirement`, `row_remapper`, `compute_processes`, `kernel_gpu_errors`, `kernel_log_journal`, `driver_info`, `pci`, `pci_link`, `fabric_manager`, `gpu_device_holders`, `process_info`, plus opt-in `dcgm_*`. The pod is pinned to the node and runs the **node's own binaries** through the host filesystem (mounted read-only at `/host`) — no custom image is involved beyond a shell (busybox); `nvidia-smi` is resolved from the host PATH or the GPU Operator's containerized-driver root. | Check-name catalog — every command string is server-owned; the caller picks only the node, check names, and strictly validated `pid`/`pci_bus_id`/`dcgm_diag_level` scalars. See [GPU node diagnostics](#gpu-node-diagnostics). |
 | `get_remediation_mcp_config` | Return the live effective policy for debugging. | — |
@@ -55,6 +55,19 @@ inside the container. Plain forms such as `ps aux`, `ps -ef`,
 names the reason and points to `run_kubectl_command` (human approval). `ps`
 output still shows process command lines, so secrets passed as CLI arguments
 remain visible — that is an accepted residual (see the design notes).
+
+### Exec argument allowlists
+
+`KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS` maps each binary to a regex its
+argv must fully match; nothing is built into the image. The shipped
+`deployment.yaml` and the Holmes chart set these forms, so
+`nvidia-smi -r`/`--gpu-reset`/`-pm`/`-pl`, `nvidia-smi nvlink --reset` and
+`dmesg -C`/`-c` never run without approval:
+
+| Binary | Allowed forms |
+|--------|---------------|
+| `nvidia-smi` | no arguments, `-L`, `-q [-d SECTIONS] [-i N]`, `--query-*=FIELDS --format=csv[,noheader][,nounits] [-i N]`, `nvlink -s\|-e [-i N]`, `topo -m` |
+| `dmesg` | any combination of `-T`, `-k`, `-r`, `-s SIZE`, `--level=LEVELS` (`-r` and `-s` also work with BusyBox `dmesg`) |
 
 ### Approval-gated fallback (always prompts a human)
 
@@ -100,6 +113,8 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 | `KUBECTL_ALLOWED_COMMANDS` | `edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec` | Hard verb allowlist for `run_kubectl_command` |
 | `KUBECTL_DANGEROUS_FLAGS` | *(empty)* | **Additional** blocked flags for `run_kubectl_command`, on top of the built-in non-removable set (server/proxy, TLS, credentials, impersonation, kubeconfig/context/kuberc, `--overrides`, profiling/cache paths) |
 | `KUBECTL_PREAPPROVED_EXEC_BINARIES` | `ps,top,df,ls,netstat,ss` | `run_preapproved_kubectl_exec_command` binary allowlist (bare names, no patterns) |
+| `KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES` | *(empty)* | binaries removed from `KUBECTL_PREAPPROVED_EXEC_BINARIES`, e.g. `nvidia-smi,dmesg` |
+| `KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS` | `{}` (`deployment.yaml` sets `nvidia-smi` and `dmesg`) | JSON map of binary to argv regex, e.g. `{"ethtool": " -S [a-z0-9]+"}`; the regex must fully match the arguments, each preceded by a space; it pre-approves the binary |
 | `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_preapproved_diagnostic_image` allowlist |
 | `KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED` | `true` | master switch for the diagnostic target policy; `false` disables **all** target checks (see warning below) |
 | `KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS` | `false` | allow diagnostic probes to target hosts outside the cluster |
