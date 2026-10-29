@@ -156,11 +156,14 @@ _BOOLEAN_SHORT_FLAGS = frozenset("ARhiqtw")
 # secrets). Binaries with options that widen what they read get a per-binary
 # argument checker (see _PREAPPROVED_EXEC_ARGV_CHECKERS): `ps` must not print
 # process environments.
-PREAPPROVED_EXEC_BINARIES = set(
+CUSTOM_EXEC_ARGV_ALLOWLISTS: Dict[str, str] = json.loads(
+    os.getenv("KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS", "{}")
+)
+PREAPPROVED_EXEC_BINARIES = (set(
     _split_csv(
         os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss,nvidia-smi,dmesg")
     )
-) - set(_split_csv(os.getenv("KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES", "")))
+) | set(CUSTOM_EXEC_ARGV_ALLOWLISTS)) - set(_split_csv(os.getenv("KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES", "")))
 
 # Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
@@ -1451,6 +1454,16 @@ _EXEC_ARGV_ALLOWED_FORMS = {
     "`--query-*=FIELDS --format=csv [-i N]`, `nvlink -s|-e [-i N]`, `topo -m`",
     "dmesg": "any of `-T`, `-k`, `--level=LEVELS`",
 }
+
+# Custom regexes extend a built-in allowlist rather than replace it.
+for _binary, _pattern in CUSTOM_EXEC_ARGV_ALLOWLISTS.items():
+    _builtin = _EXEC_ARGV_ALLOWLISTS.get(_binary)
+    _EXEC_ARGV_ALLOWLISTS[_binary] = re.compile(
+        f"(?:{_builtin.pattern})|(?:{_pattern})" if _builtin else _pattern
+    )
+    _EXEC_ARGV_ALLOWED_FORMS[_binary] = "; ".join(
+        filter(None, [_EXEC_ARGV_ALLOWED_FORMS.get(_binary), f"regex `{_pattern}`"])
+    )
 
 
 def _allowlisted_argv_reason(binary: str, args: List[str]) -> Optional[str]:
