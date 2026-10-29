@@ -820,7 +820,7 @@ def test_disabled_exec_binaries_env_removes_nvidia_smi_and_dmesg():
     assert result.stdout.strip() == str(["df", "ls", "netstat", "ps", "ss", "top"])
 
 
-def test_custom_exec_argv_allowlists_env_adds_binaries_and_extends_builtins():
+def test_exec_argv_allowlists_env_is_the_whole_argv_policy():
     custom = {"dmesg": r"( -r| -s \d+)*", "ethtool": r" -S [a-z0-9]+"}
     env = {**os.environ, "KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS": json.dumps(custom)}
     checks = [["dmesg", "-r"], ["dmesg", "-T"], ["dmesg", "-c"], ["ethtool", "-S", "eth0"], ["ethtool", "-s", "eth0"]]
@@ -829,7 +829,7 @@ def test_custom_exec_argv_allowlists_env_adds_binaries_and_extends_builtins():
         f"print([k.is_preapproved_exec_command(c) and k.preapproved_exec_argv_reason(c) is None for c in {checks}])"
     )
     result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True)
-    assert result.stdout.strip() == str([True, True, False, True, False])
+    assert result.stdout.strip() == str([True, False, False, True, False])
 
 
 @pytest.mark.parametrize("binary", ["ps", "nvidia-smi", "dmesg"])

@@ -58,9 +58,11 @@ remain visible — that is an accepted residual (see the design notes).
 
 ### Exec argument allowlists
 
-`nvidia-smi` and `dmesg` take an argument **allowlist** — any argv that is not
-one of these forms is refused, so `nvidia-smi -r`/`--gpu-reset`/`-pm`/`-pl`,
-`nvidia-smi nvlink --reset` and `dmesg -C`/`-c` never run without approval:
+`KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS` maps each binary to a regex its
+argv must fully match; nothing is built into the image. The shipped
+`deployment.yaml` and the Holmes chart set these forms, so
+`nvidia-smi -r`/`--gpu-reset`/`-pm`/`-pl`, `nvidia-smi nvlink --reset` and
+`dmesg -C`/`-c` never run without approval:
 
 | Binary | Allowed forms |
 |--------|---------------|
@@ -110,9 +112,9 @@ Server guards on `run_kubectl_command` (defense in depth, independent of approva
 |----------|---------|---------|
 | `KUBECTL_ALLOWED_COMMANDS` | `edit,patch,delete,scale,rollout,cordon,uncordon,drain,taint,label,annotate,run,exec` | Hard verb allowlist for `run_kubectl_command` |
 | `KUBECTL_DANGEROUS_FLAGS` | *(empty)* | **Additional** blocked flags for `run_kubectl_command`, on top of the built-in non-removable set (server/proxy, TLS, credentials, impersonation, kubeconfig/context/kuberc, `--overrides`, profiling/cache paths) |
-| `KUBECTL_PREAPPROVED_EXEC_BINARIES` | `ps,top,df,ls,netstat,ss,nvidia-smi,dmesg` | `run_preapproved_kubectl_exec_command` binary allowlist (bare names, no patterns) |
+| `KUBECTL_PREAPPROVED_EXEC_BINARIES` | `ps,top,df,ls,netstat,ss` | `run_preapproved_kubectl_exec_command` binary allowlist (bare names, no patterns) |
 | `KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES` | *(empty)* | binaries removed from `KUBECTL_PREAPPROVED_EXEC_BINARIES`, e.g. `nvidia-smi,dmesg` |
-| `KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS` | `{}` | JSON map of binary to argv regex, e.g. `{"ethtool": " -S [a-z0-9]+"}`; the regex must fully match the arguments, each preceded by a space; it pre-approves the binary and extends any built-in allowlist |
+| `KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS` | `{}` (`deployment.yaml` sets `nvidia-smi` and `dmesg`) | JSON map of binary to argv regex, e.g. `{"ethtool": " -S [a-z0-9]+"}`; the regex must fully match the arguments, each preceded by a space; it pre-approves the binary |
 | `KUBECTL_DIAGNOSTIC_IMAGES` | `nicolaka/netshoot:v0.13,busybox:1.37.0,curlimages/curl:8.11.1` | `run_preapproved_diagnostic_image` allowlist |
 | `KUBECTL_DIAGNOSTIC_TARGET_POLICY_ENABLED` | `true` | master switch for the diagnostic target policy; `false` disables **all** target checks (see warning below) |
 | `KUBECTL_DIAGNOSTIC_ALLOW_EXTERNAL_TARGETS` | `false` | allow diagnostic probes to target hosts outside the cluster |

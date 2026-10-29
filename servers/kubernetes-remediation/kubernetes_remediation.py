@@ -156,14 +156,15 @@ _BOOLEAN_SHORT_FLAGS = frozenset("ARhiqtw")
 # secrets). Binaries with options that widen what they read get a per-binary
 # argument checker (see _PREAPPROVED_EXEC_ARGV_CHECKERS): `ps` must not print
 # process environments.
-CUSTOM_EXEC_ARGV_ALLOWLISTS: Dict[str, str] = json.loads(
+# Binary -> regex its space-prefixed argv must fully match; set by the deployment.
+EXEC_ARGV_ALLOWLISTS: Dict[str, str] = json.loads(
     os.getenv("KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS", "{}")
 )
 PREAPPROVED_EXEC_BINARIES = (set(
     _split_csv(
-        os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss,nvidia-smi,dmesg")
+        os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss")
     )
-) | set(CUSTOM_EXEC_ARGV_ALLOWLISTS)) - set(_split_csv(os.getenv("KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES", "")))
+) | set(EXEC_ARGV_ALLOWLISTS)) - set(_split_csv(os.getenv("KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES", "")))
 
 # Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
@@ -1437,33 +1438,9 @@ def _ps_argv_reason(args: List[str]) -> Optional[str]:
     return None
 
 
-# Argument allowlists: argv must fully match one form.
 _EXEC_ARGV_ALLOWLISTS = {
-    "nvidia-smi": re.compile(
-        r"( -L)?"
-        r"| -q( -d [A-Z_,]+| -i \d+)*"
-        r"| --query-[a-z-]+=[a-z0-9_.,]+ --format=csv(,noheader|,nounits)*( -i \d+)?"
-        r"| nvlink -[se]( -i \d+)?"
-        r"| topo -m"
-    ),
-    "dmesg": re.compile(r"( -T| -k| -r| -s \d+| --level=[a-z,]+)*"),
+    binary: re.compile(pattern) for binary, pattern in EXEC_ARGV_ALLOWLISTS.items()
 }
-
-_EXEC_ARGV_ALLOWED_FORMS = {
-    "nvidia-smi": "no arguments, `-L`, `-q [-d SECTIONS] [-i N]`, "
-    "`--query-*=FIELDS --format=csv [-i N]`, `nvlink -s|-e [-i N]`, `topo -m`",
-    "dmesg": "any of `-T`, `-k`, `-r`, `-s SIZE`, `--level=LEVELS`",
-}
-
-# Custom regexes extend a built-in allowlist rather than replace it.
-for _binary, _pattern in CUSTOM_EXEC_ARGV_ALLOWLISTS.items():
-    _builtin = _EXEC_ARGV_ALLOWLISTS.get(_binary)
-    _EXEC_ARGV_ALLOWLISTS[_binary] = re.compile(
-        f"(?:{_builtin.pattern})|(?:{_pattern})" if _builtin else _pattern
-    )
-    _EXEC_ARGV_ALLOWED_FORMS[_binary] = "; ".join(
-        filter(None, [_EXEC_ARGV_ALLOWED_FORMS.get(_binary), f"regex `{_pattern}`"])
-    )
 
 
 def _allowlisted_argv_reason(binary: str, args: List[str]) -> Optional[str]:
@@ -1473,7 +1450,7 @@ def _allowlisted_argv_reason(binary: str, args: List[str]) -> Optional[str]:
         return None
     return (
         f"'{binary}' arguments {args!r} are not on the exec argument allowlist "
-        f"({_EXEC_ARGV_ALLOWED_FORMS[binary]}); {_PS_FALLBACK}."
+        f"(regex `{EXEC_ARGV_ALLOWLISTS[binary]}`); {_PS_FALLBACK}."
     )
 
 
@@ -1485,7 +1462,7 @@ _PREAPPROVED_EXEC_ARGV_CHECKERS = {
 PREAPPROVED_EXEC_ARGV_POLICY = {
     "ps": "BSD 'e' (environment display) refused in every spelling; unrecognised "
     "options refused; -e with user/group/session/tty selectors refused",
-    **{binary: f"allowlist only: {forms}" for binary, forms in _EXEC_ARGV_ALLOWED_FORMS.items()},
+    **{binary: f"allowlist only: regex `{pattern}`" for binary, pattern in EXEC_ARGV_ALLOWLISTS.items()},
 }
 
 
@@ -1590,7 +1567,7 @@ def read_file_from_container(
     description=(
         "AUTO-APPROVED (runs immediately, no human needed). Run one of the "
         "operator's pre-approved read-only diagnostic binaries INSIDE a container "
-        "via `kubectl exec` (e.g. ps/top/df/ls/netstat/ss/nvidia-smi/dmesg). Pass the pod, "
+        "via `kubectl exec` (e.g. ps/top/df/ls/netstat/ss). Pass the pod, "
         "namespace, optional container, and the in-container command as a list; "
         "the server builds the `kubectl exec ... -- <command>` invocation itself.\n\n"
         "The command's binary (command[0]) must be on the allowlist; if it isn't "
@@ -1598,9 +1575,9 @@ def read_file_from_container(
         "(which requires human approval). `ps` additionally may not display "
         "process environments: the BSD `e` flag (`ps auxe`, `ps -p 1 e`) and "
         "`-e` combined with a user/group/tty selector are refused — use "
-        "`ps aux`, `ps -ef` or `ps -eo pid,user,etime,args`. `nvidia-smi` accepts "
-        f"only {_EXEC_ARGV_ALLOWED_FORMS['nvidia-smi']}; `dmesg` accepts only "
-        f"{_EXEC_ARGV_ALLOWED_FORMS['dmesg']}. To read a file use "
+        "`ps aux`, `ps -ef` or `ps -eo pid,user,etime,args`. These binaries accept "
+        "only arguments whose space-prefixed argv fully matches their regex: "
+        f"{json.dumps(EXEC_ARGV_ALLOWLISTS)}. To read a file use "
         "read_file_from_container instead of `cat`.\n\n"
         "Example: run_preapproved_kubectl_exec_command(pod=\"api-xxx\", namespace=\"prod\", command=[\"ps\",\"aux\"])"
     ),

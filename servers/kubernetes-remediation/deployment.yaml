@@ -38,7 +38,11 @@ spec:
         # Pre-approved read-only in-container binaries for
         # run_preapproved_kubectl_exec_command (auto-approved)
         - name: KUBECTL_PREAPPROVED_EXEC_BINARIES
-          value: "ps,top,df,ls,netstat,ss,nvidia-smi,dmesg"
+          value: "ps,top,df,ls,netstat,ss"
+
+        # Binary -> regex the space-prefixed argv must fully match (auto-approved)
+        - name: KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS
+          value: '{"nvidia-smi": "( -L)?| -q( -d [A-Z_,]+| -i \\d+)*| --query-[a-z-]+=[a-z0-9_.,]+ --format=csv(,noheader|,nounits)*( -i \\d+)?| nvlink -[se]( -i \\d+)?| topo -m", "dmesg": "( -T| -k| -r| -s \\d+| --level=[a-z,]+)*"}'
 
         # Pre-approved troubleshooting images for run_preapproved_diagnostic_image (auto-approved)
         - name: KUBECTL_DIAGNOSTIC_IMAGES
