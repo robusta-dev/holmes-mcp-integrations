@@ -157,14 +157,17 @@ _BOOLEAN_SHORT_FLAGS = frozenset("ARhiqtw")
 # argument checker (see _PREAPPROVED_EXEC_ARGV_CHECKERS): `ps` must not print
 # process environments.
 # Binary -> regex its space-prefixed argv must fully match; set by the deployment.
-EXEC_ARGV_ALLOWLISTS: Dict[str, str] = json.loads(
-    os.getenv("KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS", "{}")
-)
+DISABLED_EXEC_BINARIES = set(_split_csv(os.getenv("KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES", "")))
+EXEC_ARGV_ALLOWLISTS: Dict[str, str] = {
+    binary: pattern
+    for binary, pattern in json.loads(os.getenv("KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS", "{}")).items()
+    if binary not in DISABLED_EXEC_BINARIES
+}
 PREAPPROVED_EXEC_BINARIES = (set(
     _split_csv(
         os.getenv("KUBECTL_PREAPPROVED_EXEC_BINARIES", "ps,top,df,ls,netstat,ss")
     )
-) | set(EXEC_ARGV_ALLOWLISTS)) - set(_split_csv(os.getenv("KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES", "")))
+) | set(EXEC_ARGV_ALLOWLISTS)) - DISABLED_EXEC_BINARIES
 
 # Pre-approved read-only troubleshooting images for run_preapproved_diagnostic_image.
 # Matched on the repository (tag is supplied by the server from this pin).
@@ -1455,14 +1458,14 @@ def _allowlisted_argv_reason(binary: str, args: List[str]) -> Optional[str]:
 
 
 _PREAPPROVED_EXEC_ARGV_CHECKERS = {
-    "ps": _ps_argv_reason,
     **{binary: partial(_allowlisted_argv_reason, binary) for binary in _EXEC_ARGV_ALLOWLISTS},
+    "ps": _ps_argv_reason,
 }
 
 PREAPPROVED_EXEC_ARGV_POLICY = {
+    **{binary: f"allowlist only: regex `{pattern}`" for binary, pattern in EXEC_ARGV_ALLOWLISTS.items()},
     "ps": "BSD 'e' (environment display) refused in every spelling; unrecognised "
     "options refused; -e with user/group/session/tty selectors refused",
-    **{binary: f"allowlist only: regex `{pattern}`" for binary, pattern in EXEC_ARGV_ALLOWLISTS.items()},
 }
 
 

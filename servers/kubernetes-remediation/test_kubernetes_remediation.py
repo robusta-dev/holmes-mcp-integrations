@@ -814,22 +814,22 @@ def test_preapproved_exec_runs_allowlisted_nvidia_smi():
 def test_disabled_exec_binaries_env_removes_nvidia_smi_and_dmesg():
     env = {**os.environ, "KUBECTL_PREAPPROVED_EXEC_DISABLED_BINARIES": "nvidia-smi, dmesg"}
     result = subprocess.run(
-        [sys.executable, "-c", "import kubernetes_remediation as k; print(sorted(k.PREAPPROVED_EXEC_BINARIES))"],
+        [sys.executable, "-c", "import kubernetes_remediation as k; print(sorted(k.PREAPPROVED_EXEC_BINARIES), sorted(k.PREAPPROVED_EXEC_ARGV_POLICY))"],
         env=env, capture_output=True, text=True, check=True,
     )
-    assert result.stdout.strip() == str(["df", "ls", "netstat", "ps", "ss", "top"])
+    assert result.stdout.strip() == f"{['df', 'ls', 'netstat', 'ps', 'ss', 'top']} {['ps']}"
 
 
 def test_exec_argv_allowlists_env_is_the_whole_argv_policy():
-    custom = {"dmesg": r"( -r| -s \d+)*", "ethtool": r" -S [a-z0-9]+"}
+    custom = {"dmesg": r"( -r| -s \d+)*", "ethtool": r" -S [a-z0-9]+", "ps": r" -e -u [a-z]+"}
     env = {**os.environ, "KUBECTL_PREAPPROVED_EXEC_ARGV_ALLOWLISTS": json.dumps(custom)}
-    checks = [["dmesg", "-r"], ["dmesg", "-T"], ["dmesg", "-c"], ["ethtool", "-S", "eth0"], ["ethtool", "-s", "eth0"]]
+    checks = [["dmesg", "-r"], ["dmesg", "-T"], ["dmesg", "-c"], ["ethtool", "-S", "eth0"], ["ethtool", "-s", "eth0"], ["ps", "-e", "-u", "x"], ["ps", "aux"]]
     script = (
         "import kubernetes_remediation as k; "
         f"print([k.is_preapproved_exec_command(c) and k.preapproved_exec_argv_reason(c) is None for c in {checks}])"
     )
     result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True)
-    assert result.stdout.strip() == str([True, False, False, True, False])
+    assert result.stdout.strip() == str([True, False, False, True, False, False, True])
 
 
 @pytest.mark.parametrize("binary", ["ps", "nvidia-smi", "dmesg"])
