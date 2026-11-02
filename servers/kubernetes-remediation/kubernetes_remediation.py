@@ -666,7 +666,7 @@ NODE_CHECKS: Dict[str, str] = {**GPU_CHECKS, **HOST_CHECKS}
 
 
 # Create MCP server
-mcp = FastMCP(name="kubernetes-remediation", version="1.4.0")
+mcp = FastMCP(name="kubernetes-remediation", version="1.5.0")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
