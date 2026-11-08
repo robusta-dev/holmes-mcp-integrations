@@ -1,7 +1,8 @@
 # MCP Base Image
 # Base image for MCP servers using Supergateway
 
-FROM supercorp/supergateway:latest
+# Pinned: the patch scripts below only support 3.4.3
+FROM supercorp/supergateway:3.4.3
 
 USER root
 
@@ -42,7 +43,7 @@ RUN NODE_VERSION=20.20.2 && \
 # - brace-expansion (CVE-2026-33750)
 RUN npm install -g npm@^11 && \
     cd /tmp && \
-    npm pack minimatch@latest && npm pack tar@latest && npm pack picomatch@latest && npm pack brace-expansion@latest && \
+    npm pack minimatch@^10.2.6 && npm pack tar@latest && npm pack picomatch@latest && npm pack brace-expansion@latest && \
     cd /usr/local/lib/node_modules/npm/node_modules/minimatch && \
     tar xzf /tmp/minimatch-*.tgz --strip-components=1 && \
     cd /usr/local/lib/node_modules/npm/node_modules/tar && \
@@ -63,23 +64,27 @@ RUN npm install -g npm@^11 && \
 # - ip-address 10.2.0 → 10.3.1 (CVE-2026-69192, CVE-2026-54272, CVE-2026-69198)
 # - hono 4.12.27 → 4.12.34 (CVE-2026-69207, CVE-2026-71848, CVE-2026-71850)
 # - @hono/node-server 1.19.14 → 1.19.15 (GHSA-frvp-7c67-39w9)
+# - proxy-addr 2.0.7 → 2.0.8 (CVE-2026-90711)
+# - body-parser 1.20.8 → 1.20.9 (CVE-2026-111181)
 # hono/@hono/node-server are held on their current major on purpose: the
 # supergateway 3.4.3 patch scripts below are version-pinned against that tree,
 # and 1.19.15 / 4.12.34 already carry the fixes.
 RUN cd /usr/local/lib/node_modules/supergateway && \
     npm install @modelcontextprotocol/sdk@latest @isaacs/brace-expansion@latest qs@latest \
     minimatch@latest tar@latest cross-spawn@latest esbuild@latest \
-    fast-uri@^3.1.5 ip-address@^10.3.1 hono@^4.12.34 @hono/node-server@^1.19.15 && \
+    fast-uri@^3.1.5 ip-address@^10.3.1 hono@^4.12.34 @hono/node-server@^1.19.15 \
+    proxy-addr@^2.0.8 body-parser@^1.20.9 && \
     sed -i 's/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@[^"]*"/"prev-modelcontextprotocol-sdk": "npm:@modelcontextprotocol\/sdk@latest"/' package.json && \
     npm install && \
     npm audit fix --force || true
 
 # Patch npm's bundled deps that `npm install -g npm@latest` still ships stale:
 # - ip-address 10.2.0 → 10.3.1 (CVE-2026-69192, CVE-2026-54272, CVE-2026-69198)
-# - undici 6.27.0 → 6.28.0 (CVE-2026-15157, CVE-2026-16728, CVE-2026-16729)
+# - undici 6.27.0 → 6.29.1 (CVE-2026-15157, CVE-2026-16728, CVE-2026-16729,
+#   CVE-2026-87018, CVE-2026-109869, CVE-2026-109383)
 # Both stay on their current major so npm itself keeps working.
 RUN cd /tmp && \
-    npm pack ip-address@^10.3.1 && npm pack undici@^6.28.0 && \
+    npm pack ip-address@^10.3.1 && npm pack undici@^6.29.1 && \
     for pkg in ip-address undici; do \
         for dir in $(find /usr/local/lib/node_modules -type d -name "$pkg" 2>/dev/null); do \
             tar xzf /tmp/"$pkg"-*.tgz --strip-components=1 -C "$dir" 2>/dev/null || true; \
@@ -98,6 +103,11 @@ RUN cd /tmp && npm pack cross-spawn@latest && \
 # already-installed MCP server tree (npm -g install or npx prewarm cache).
 COPY patch-node-deps.sh /usr/local/bin/patch-node-deps.sh
 RUN chmod +x /usr/local/bin/patch-node-deps.sh
+
+# body-parser 2.3.0 → 2.4.0 (CVE-2026-111181) in the lockfile-pinned SDK copies
+RUN SG=/usr/local/lib/node_modules/supergateway/node_modules && \
+    /usr/local/bin/patch-node-deps.sh $SG/@modelcontextprotocol body-parser@^2.4.0 && \
+    /usr/local/bin/patch-node-deps.sh $SG/prev-modelcontextprotocol-sdk body-parser@^2.4.0
 
 # Fix child process leak in stateless streamableHttp mode.
 # Every POST spawns a stdio child that is never killed after the response

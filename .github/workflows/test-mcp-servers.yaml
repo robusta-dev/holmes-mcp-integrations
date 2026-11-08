@@ -1,0 +1,100 @@
+name: Test MCP servers
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      github: ${{ steps.filter.outputs.github }}
+      sentry: ${{ steps.filter.outputs.sentry }}
+      azure: ${{ steps.filter.outputs.azure }}
+    steps:
+      - uses: actions/checkout@v4
+      # Only image-changing files, not docs, build scripts or auto-build-config.yaml
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            github:
+              - "servers/github/Dockerfile"
+              - "servers/github-app/Dockerfile"
+              - "servers/github-app/wrapper.py"
+              - "servers/github-app/github_app_auth.py"
+            sentry:
+              - "servers/sentry/Dockerfile"
+              - "mcp_base_image/Dockerfile"
+              - "mcp_base_image/patch-*.sh"
+            azure:
+              - "servers/azure/Dockerfile"
+
+  # Builds the github (PAT) and github-app images and calls a read-only tool on each
+  test-github-app:
+    needs: changes
+    if: needs.changes.outputs.github == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pytest PyGithub==2.9.1 responses cryptography
+
+      - name: Unit tests
+        run: pytest servers/github-app
+
+      - name: Docker tests
+        env:
+          MCP_TEST_GITHUB_PAT: ${{ secrets.MCP_TEST_GITHUB_PAT }}
+          MCP_TEST_GITHUB_APP_ID: ${{ secrets.MCP_TEST_GITHUB_APP_ID }}
+          MCP_TEST_GITHUB_APP_PRIVATE_KEY: ${{ secrets.MCP_TEST_GITHUB_APP_PRIVATE_KEY }}
+          MCP_TEST_GITHUB_APP_INSTALLATION_ID: ${{ secrets.MCP_TEST_GITHUB_APP_INSTALLATION_ID }}
+        run: pytest tests -k github -v
+
+  # TODO: run against a real Sentry test org once MCP_TEST_SENTRY_AUTH_TOKEN exists
+  test-sentry:
+    needs: changes
+    if: needs.changes.outputs.sentry == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      # The sentry Dockerfile pins the base by registry tag, so build that tag locally to test this PR's base
+      - name: Build base image
+        run: |
+          version=$(grep '^version:' mcp_base_image/auto-build-config.yaml | cut -d'"' -f2)
+          docker build -t us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:$version mcp_base_image
+
+      - name: Docker tests
+        run: pytest tests -k sentry -v
+
+  # TODO: run against a real Reader-only service principal once MCP_TEST_AZURE_* secrets exist
+  test-azure:
+    needs: changes
+    if: needs.changes.outputs.azure == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Docker tests
+        run: pytest tests -k azure -v
