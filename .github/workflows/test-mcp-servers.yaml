@@ -1,20 +1,34 @@
-name: Test GitHub MCP servers
+name: Test MCP servers
 
 on:
   pull_request:
-    # Only image-changing files, not docs, build scripts or auto-build-config.yaml
-    paths:
-      - "servers/github/Dockerfile"
-      - "servers/github-app/Dockerfile"
-      - "servers/github-app/wrapper.py"
-      - "servers/github-app/github_app_auth.py"
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  test:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      github: ${{ steps.filter.outputs.github }}
+    steps:
+      - uses: actions/checkout@v4
+      # Only image-changing files, not docs, build scripts or auto-build-config.yaml
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            github:
+              - "servers/github/Dockerfile"
+              - "servers/github-app/Dockerfile"
+              - "servers/github-app/wrapper.py"
+              - "servers/github-app/github_app_auth.py"
+
+  test-github-app:
+    needs: changes
+    if: needs.changes.outputs.github == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -40,7 +54,7 @@ jobs:
             -e GITHUB_PERSONAL_ACCESS_TOKEN -e GITHUB_APP_ID -e GITHUB_APP_PRIVATE_KEY -e GITHUB_APP_INSTALLATION_ID \
             mcp-under-test
 
-      - name: Smoke test
+      - name: Smoke test (read-only)
         env:
           MCP_TOKEN: ${{ matrix.server == 'github' && secrets.MCP_TEST_GITHUB_PAT || '' }}
         run: python3 .github/scripts/smoke_github_mcp.py http://localhost:8000/ "$TEST_REPO"
