@@ -6,6 +6,7 @@ Run one server with: pytest tests -k github-app
 """
 import json
 import os
+import shutil
 import socket
 import subprocess
 import time
@@ -171,10 +172,10 @@ def fake_atlassian(network):
 def kind_files(tmp_path_factory):
     """Kubeconfig for the kind cluster as seen from containers on the kind network."""
     kubeconfig = subprocess.run(["kind", "get", "kubeconfig", "--internal", "--name", KIND_CLUSTER],
-                                capture_output=True, text=True)
-    if kubeconfig.returncode and os.environ.get("CI"):
-        pytest.fail(f"kind cluster {KIND_CLUSTER} not found: {kubeconfig.stderr}")
-    if kubeconfig.returncode:
+                                capture_output=True, text=True) if shutil.which("kind") else None
+    if (not kubeconfig or kubeconfig.returncode) and os.environ.get("CI"):
+        pytest.fail(f"kind cluster {KIND_CLUSTER} not found")
+    if not kubeconfig or kubeconfig.returncode:
         pytest.skip(f"kind cluster {KIND_CLUSTER} not found, create it with: kind create cluster --name {KIND_CLUSTER}")
     files = tmp_path_factory.mktemp("kind")
     (files / "kubeconfig").write_text(kubeconfig.stdout)
