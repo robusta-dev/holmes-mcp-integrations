@@ -20,6 +20,9 @@ TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
 TOPAZ_IMAGE = "thecloudtheory/topaz-host:v1.10.222-preview"
 MOCK_PYTHON_IMAGE = "python:3.13-alpine"
+PREFECT_IMAGE = "prefecthq/prefect:3.9.3-python3.12"
+PREFECT_SEED_FLOW = ("import urllib.request; urllib.request.urlopen(urllib.request.Request("
+                     "'http://localhost:4200/api/flows/', b'{\"name\": \"mcp-test-flow\"}', {'Content-Type': 'application/json'}))")
 GITHUB_TEST_COMMITS = ("list_commits", {"owner": "kotlickya", "repo": "argo-repo", "perPage": 1}, "sha")
 
 
@@ -30,6 +33,7 @@ class ServerCase:
     arguments: dict
     expect: str
     container_env: dict = field(default_factory=dict)  # container var -> MCP_TEST_* secret
+    env: dict = field(default_factory=dict)  # container var -> literal value
     token_secret: str = ""  # MCP_TEST_* secret sent as the Bearer token
     path: str = "/"
     transport: str = "http"
@@ -52,6 +56,8 @@ SERVERS = [
     # TODO: use a real Reader-only service principal (MCP_TEST_AZURE_*) instead of the Topaz emulator
     ServerCase("azure", "call_az", {"cli_command": "az group list"}, "mcp-test-rg", path="/mcp",
                mock="topaz", entrypoint="azure_topaz_entrypoint.sh"),
+    ServerCase("prefect", "get_flows", {}, "mcp-test-flow", path="/sse", transport="sse", mock="prefect_server",
+               env={"PREFECT_API_URL": "http://prefect-server:4200/api"}),
 ]
 
 
@@ -106,6 +112,19 @@ def topaz(network):
     subprocess.run(["docker", "rm", "-f", container], capture_output=True)
 
 
+@pytest.fixture
+def prefect_server(network):
+    container = docker_run("--network", network, "--network-alias", "prefect-server", PREFECT_IMAGE,
+                           "prefect", "server", "start", "--host", "0.0.0.0")
+    deadline = time.time() + 120
+    while subprocess.run(["docker", "exec", container, "python", "-c", PREFECT_SEED_FLOW], capture_output=True).returncode:
+        if time.time() > deadline:
+            pytest.fail("Prefect server not ready after 120s")
+        time.sleep(2)
+    yield container
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
 @pytest.fixture(params=SERVERS, ids=lambda case: case.name)
 def server(request, network):
     case = request.param
@@ -122,6 +141,7 @@ def server(request, network):
                    check=True, stdout=subprocess.DEVNULL)
     port = free_port()
     env_flags = [flag for var in case.container_env for flag in ("-e", var)]
+    env_flags += [flag for var, value in case.env.items() for flag in ("-e", f"{var}={value}")]
     container_env = {var: os.environ[secret] for var, secret in case.container_env.items()}
     command = case.command
     entrypoint_flags = []
