@@ -15,6 +15,7 @@ jobs:
       github: ${{ steps.filter.outputs.github }}
       sentry: ${{ steps.filter.outputs.sentry }}
       azure: ${{ steps.filter.outputs.azure }}
+      stand_in_servers: ${{ steps.stand_in_filter.outputs.changes }}
     steps:
       - uses: actions/checkout@v4
       # Only image-changing files, not docs, build scripts or auto-build-config.yaml
@@ -33,6 +34,27 @@ jobs:
               - "mcp_base_image/patch-*.sh"
             azure:
               - "servers/azure/Dockerfile"
+      # Servers tested against stand-in providers only; each filter name is a pytest -k expression
+      - uses: dorny/paths-filter@v3
+        id: stand_in_filter
+        with:
+          filters: |
+            prefect:
+              - "servers/prefect/Dockerfile"
+              - "mcp_base_image/Dockerfile"
+              - "mcp_base_image/patch-*.sh"
+            mcp-atlassian:
+              - "servers/mcp-atlassian/Dockerfile"
+            gcp:
+              - "servers/gcp/*/Dockerfile"
+              - "servers/gcp/gcloud/entrypoint.sh"
+              - "mcp_base_image/Dockerfile"
+              - "mcp_base_image/patch-*.sh"
+            kubernetes:
+              - "servers/kubernetes-mcp-server/Dockerfile"
+              - "servers/kubernetes-remediation/Dockerfile"
+              - "servers/kubernetes-remediation/kubernetes_remediation.py"
+              - "servers/kubernetes-remediation/requirements.txt"
 
   # Builds the github (PAT) and github-app images and calls a read-only tool on each
   test-github-app:
@@ -98,3 +120,35 @@ jobs:
 
       - name: Docker tests
         run: pytest tests -k azure -v
+
+  # Builds each changed stand-in server and calls a read-only tool against its stand-in provider
+  test-stand-in-servers:
+    needs: changes
+    if: needs.changes.outputs.stand_in_servers != '[]' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      # The kubernetes servers run against this cluster; the tests read its kubeconfig with kind get kubeconfig
+      - name: Create kind cluster
+        if: contains(needs.changes.outputs.stand_in_servers, 'kubernetes') || github.event_name == 'workflow_dispatch'
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: mcp-test
+
+      # These Dockerfiles pin the base by registry tag, so build that tag locally to test this PR's base
+      - name: Build base image
+        run: |
+          version=$(grep '^version:' mcp_base_image/auto-build-config.yaml | cut -d'"' -f2)
+          docker build -t us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:$version mcp_base_image
+
+      - name: Docker tests
+        env:
+          SERVERS: ${{ github.event_name == 'workflow_dispatch' && '["prefect", "mcp-atlassian", "gcp", "kubernetes"]' || needs.changes.outputs.stand_in_servers }}
+        run: pytest tests -v -k "$(echo "$SERVERS" | jq -r 'join(" or ")')"
