@@ -21,6 +21,8 @@ REPO_ROOT = TESTS_DIR.parent
 TOPAZ_IMAGE = "thecloudtheory/topaz-host:v1.10.222-preview"
 MOCK_PYTHON_IMAGE = "python:3.13-alpine"
 PREFECT_IMAGE = "prefecthq/prefect:3.9.3-python3.12"
+FAKE_GCS_IMAGE = "fsouza/fake-gcs-server:1.52.2"
+GCP_PROJECT = "mcp-test-project"
 PREFECT_SEED_FLOW = ("import urllib.request; urllib.request.urlopen(urllib.request.Request("
                      "'http://localhost:4200/api/flows/', b'{\"name\": \"mcp-test-flow\"}', {'Content-Type': 'application/json'}))")
 GITHUB_TEST_COMMITS = ("list_commits", {"owner": "kotlickya", "repo": "argo-repo", "perPage": 1}, "sha")
@@ -40,6 +42,7 @@ class ServerCase:
     mock: str = ""  # fixture starting a stand-in provider on the test network
     command: list = field(default_factory=list)  # replaces the image CMD
     entrypoint: str = ""  # script in tests/ run before the image's own CMD
+    files: str = ""  # fixture whose directory is mounted read-only at /mcp-test
 
 
 SERVERS = [
@@ -63,6 +66,26 @@ SERVERS = [
                transport="sse", mock="fake_gitlab", env={"GITLAB_API_URL": "http://fake-gitlab:8080/api/v4",
                                                          "GITLAB_PERSONAL_ACCESS_TOKEN": "fake",
                                                          "GITLAB_READ_ONLY_MODE": "true"}),
+    # TODO: use an Atlassian Cloud test site (MCP_TEST_CONFLUENCE_*) instead of fake_atlassian.py
+    ServerCase("mcp-atlassian", "confluence_search", {"query": "mcp-test-7f3a"}, "MCP test page", path="/sse",
+               transport="sse", mock="fake_atlassian",
+               env={"TRANSPORT": "sse", "PORT": "8000", "CONFLUENCE_URL": "http://fake-atlassian:8080/wiki",
+                    "CONFLUENCE_USERNAME": "mcp-test@example.com", "CONFLUENCE_API_TOKEN": "fake",
+                    "READ_ONLY_MODE": "true", "ALLOW_GLOBAL_CRED_FALLBACK": "true",
+                    "ENABLED_TOOLS": "confluence_search,confluence_get_page"}),
+    # TODO: use a Viewer-only service account key on a GCP test project instead of fake_gcp.py and fake-gcs-server
+    ServerCase("gcp/gcloud", "run_gcloud_command", {"args": ["projects", "describe", GCP_PROJECT]}, GCP_PROJECT,
+               path="/sse", transport="sse", mock="fake_gcp", files="gcp_files",
+               env={"CLOUDSDK_AUTH_ACCESS_TOKEN_FILE": "/mcp-test/token",
+                    "CLOUDSDK_API_ENDPOINT_OVERRIDES_CLOUDRESOURCEMANAGER": "http://fake-gcp:8080/"}),
+    ServerCase("gcp/observability", "list_log_names", {"parent": f"projects/{GCP_PROJECT}"}, "mcp-test-log",
+               path="/sse", transport="sse", mock="fake_gcp", files="gcp_files",
+               command=["--port", "8000", "--stdio", "observability-mcp"],
+               env={"GOOGLE_APPLICATION_CREDENTIALS": "/mcp-test/key.json", "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "fake.test",
+                    "NODE_EXTRA_CA_CERTS": "/mcp-test/ca.crt", "GOOGLE_CLOUD_PROJECT": GCP_PROJECT}),
+    ServerCase("gcp/storage", "list_objects", {"bucket_name": "mcp-test-bucket"}, "mcp-test-marker.txt",
+               path="/sse", transport="sse", mock="fake_gcs", command=["--port", "8000", "--stdio", "storage-mcp"],
+               env={"STORAGE_EMULATOR_HOST": "http://fake-gcs:4443/storage/v1", "GOOGLE_CLOUD_PROJECT": GCP_PROJECT}),
 ]
 
 
@@ -95,10 +118,36 @@ def network():
     subprocess.run(["docker", "network", "rm", name], capture_output=True)
 
 
-def run_fake(network, script):
+def run_fake(network, script, *args):
     alias = script.replace("_", "-")
     return docker_run("--network", network, "--network-alias", alias, "-v", f"{TESTS_DIR / script}.py:/{script}.py:ro",
-                      MOCK_PYTHON_IMAGE, "python3", f"/{script}.py")
+                      *args, MOCK_PYTHON_IMAGE, "python3", f"/{script}.py")
+
+
+def openssl(*args):
+    subprocess.run(["openssl", *args], check=True, capture_output=True)
+
+
+@pytest.fixture(scope="session")
+def gcp_files(tmp_path_factory):
+    """Fake service account key, access token and a test CA for the fake.test universe."""
+    files = tmp_path_factory.mktemp("gcp")
+    openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=mcp-test-ca",
+            "-keyout", files / "ca.key", "-out", files / "ca.crt")
+    openssl("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=fake.test",
+            "-keyout", files / "server.key", "-out", files / "server.csr")
+    (files / "san.cnf").write_text("subjectAltName=DNS:logging.fake.test,DNS:oauth2.fake.test\n")
+    openssl("x509", "-req", "-days", "1", "-in", files / "server.csr", "-CA", files / "ca.crt", "-CAkey", files / "ca.key",
+            "-CAcreateserial", "-extfile", files / "san.cnf", "-out", files / "server.crt")
+    openssl("genrsa", "-out", files / "sa.pem", "2048")
+    (files / "key.json").write_text(json.dumps({
+        "type": "service_account", "project_id": GCP_PROJECT, "private_key_id": "1",
+        "private_key": (files / "sa.pem").read_text(), "client_email": f"mcp-test@{GCP_PROJECT}.iam.gserviceaccount.com",
+        "client_id": "1", "token_uri": "https://oauth2.fake.test/token", "universe_domain": "fake.test"}))
+    (files / "token").write_text("fake")
+    for path in [files, *files.iterdir()]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    return files
 
 
 @pytest.fixture
@@ -109,8 +158,36 @@ def fake_sentry(network):
 
 
 @pytest.fixture
+def fake_atlassian(network):
+    container = run_fake(network, "fake_atlassian")
+    yield container
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
+@pytest.fixture
 def fake_gitlab(network):
     container = run_fake(network, "fake_gitlab")
+    yield container
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
+@pytest.fixture
+def fake_gcp(network, gcp_files):
+    container = run_fake(network, "fake_gcp", "--network-alias", "logging.fake.test", "--network-alias",
+                         "oauth2.fake.test", "-v", f"{gcp_files}:/mcp-test:ro")
+    yield container
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
+@pytest.fixture
+def fake_gcs(network, tmp_path):
+    bucket = tmp_path / "mcp-test-bucket"
+    bucket.mkdir(parents=True)
+    (bucket / "mcp-test-marker.txt").write_text("mcp test")
+    for path in [tmp_path, bucket, *bucket.iterdir()]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    container = docker_run("--network", network, "--network-alias", "fake-gcs", "-v", f"{tmp_path}:/data:ro",
+                           FAKE_GCS_IMAGE, "-scheme", "http", "-port", "4443", "-data", "/data")
     yield container
     subprocess.run(["docker", "rm", "-f", container], capture_output=True)
 
@@ -164,6 +241,8 @@ def server(request, network):
     if case.entrypoint:
         command = command or image_cmd(image)
         entrypoint_flags = ["-v", f"{TESTS_DIR}:/tests:ro", "--entrypoint", f"/tests/{case.entrypoint}"]
+    if case.files:
+        entrypoint_flags += ["-v", f"{request.getfixturevalue(case.files)}:/mcp-test:ro"]
     container = docker_run("--network", network, "-p", f"{port}:8000", *env_flags, *entrypoint_flags,
                            image, *command, env=os.environ | container_env)
     yield case, f"http://localhost:{port}{case.path}"
