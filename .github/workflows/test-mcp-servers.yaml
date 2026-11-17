@@ -15,7 +15,10 @@ jobs:
       github: ${{ steps.filter.outputs.github }}
       sentry: ${{ steps.filter.outputs.sentry }}
       azure: ${{ steps.filter.outputs.azure }}
-      stand_in_servers: ${{ steps.stand_in_filter.outputs.changes }}
+      prefect: ${{ steps.filter.outputs.prefect }}
+      confluence: ${{ steps.filter.outputs.confluence }}
+      gcp: ${{ steps.filter.outputs.gcp }}
+      kubernetes: ${{ steps.filter.outputs.kubernetes }}
     steps:
       - uses: actions/checkout@v4
       # Only image-changing files, not docs, build scripts or auto-build-config.yaml
@@ -34,16 +37,11 @@ jobs:
               - "mcp_base_image/patch-*.sh"
             azure:
               - "servers/azure/Dockerfile"
-      # Servers tested against stand-in providers only; each filter name is a pytest -k expression
-      - uses: dorny/paths-filter@v3
-        id: stand_in_filter
-        with:
-          filters: |
             prefect:
               - "servers/prefect/Dockerfile"
               - "mcp_base_image/Dockerfile"
               - "mcp_base_image/patch-*.sh"
-            mcp-atlassian:
+            confluence:
               - "servers/mcp-atlassian/Dockerfile"
             gcp:
               - "servers/gcp/*/Dockerfile"
@@ -85,70 +83,49 @@ jobs:
   test-sentry:
     needs: changes
     if: needs.changes.outputs.sentry == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install test dependencies
-        run: pip install pytest
-
-      # The sentry Dockerfile pins the base by registry tag, so build that tag locally to test this PR's base
-      - name: Build base image
-        run: |
-          version=$(grep '^version:' mcp_base_image/auto-build-config.yaml | cut -d'"' -f2)
-          docker build -t us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:$version mcp_base_image
-
-      - name: Docker tests
-        run: pytest tests -k sentry -v
+    uses: ./.github/workflows/test-mcp-server.yaml
+    with:
+      server: sentry
+      build-base: true
 
   # TODO: run against a real Reader-only service principal once MCP_TEST_AZURE_* secrets exist
   test-azure:
     needs: changes
     if: needs.changes.outputs.azure == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+    uses: ./.github/workflows/test-mcp-server.yaml
+    with:
+      server: azure
 
-      - name: Install test dependencies
-        run: pip install pytest
-
-      - name: Docker tests
-        run: pytest tests -k azure -v
-
-  # Builds each changed stand-in server and calls a read-only tool against its stand-in provider
-  test-stand-in-servers:
+  # Runs against a real Prefect server container
+  test-prefect:
     needs: changes
-    if: needs.changes.outputs.stand_in_servers != '[]' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+    if: needs.changes.outputs.prefect == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/test-mcp-server.yaml
+    with:
+      server: prefect
+      build-base: true
 
-      - name: Install test dependencies
-        run: pip install pytest
+  # TODO: run against an Atlassian Cloud test site once MCP_TEST_CONFLUENCE_* secrets exist
+  test-confluence:
+    needs: changes
+    if: needs.changes.outputs.confluence == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/test-mcp-server.yaml
+    with:
+      server: mcp-atlassian
 
-      # The kubernetes servers run against this cluster; the tests read its kubeconfig with kind get kubeconfig
-      - name: Create kind cluster
-        if: contains(needs.changes.outputs.stand_in_servers, 'kubernetes') || github.event_name == 'workflow_dispatch'
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: mcp-test
+  # TODO: run against a GCP test project once a Viewer-only service account key exists
+  test-gcp:
+    needs: changes
+    if: needs.changes.outputs.gcp == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/test-mcp-server.yaml
+    with:
+      server: gcp
+      build-base: true
 
-      # These Dockerfiles pin the base by registry tag, so build that tag locally to test this PR's base
-      - name: Build base image
-        run: |
-          version=$(grep '^version:' mcp_base_image/auto-build-config.yaml | cut -d'"' -f2)
-          docker build -t us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:$version mcp_base_image
-
-      - name: Docker tests
-        env:
-          SERVERS: ${{ github.event_name == 'workflow_dispatch' && '["prefect", "mcp-atlassian", "gcp", "kubernetes"]' || needs.changes.outputs.stand_in_servers }}
-        run: pytest tests -v -k "$(echo "$SERVERS" | jq -r 'join(" or ")')"
+  test-kubernetes:
+    needs: changes
+    if: needs.changes.outputs.kubernetes == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/test-mcp-server.yaml
+    with:
+      server: kubernetes
+      kind: true
