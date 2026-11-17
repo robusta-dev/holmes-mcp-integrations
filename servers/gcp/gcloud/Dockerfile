@@ -1,7 +1,7 @@
 # gcloud MCP Server with Supergateway
 # Uses Supergateway base image to convert STDIO MCP to HTTP/SSE API
 
-FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:0.1.6
+FROM us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:0.1.7
 
 # Switch to root to install dependencies
 USER root
