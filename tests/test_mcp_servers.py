@@ -23,6 +23,7 @@ MOCK_PYTHON_IMAGE = "python:3.13-alpine"
 PREFECT_IMAGE = "prefecthq/prefect:3.9.3-python3.12"
 FAKE_GCS_IMAGE = "fsouza/fake-gcs-server:1.52.2"
 GCP_PROJECT = "mcp-test-project"
+KIND_CLUSTER = os.environ.get("KIND_CLUSTER", "mcp-test")
 PREFECT_SEED_FLOW = ("import urllib.request; urllib.request.urlopen(urllib.request.Request("
                      "'http://localhost:4200/api/flows/', b'{\"name\": \"mcp-test-flow\"}', {'Content-Type': 'application/json'}))")
 GITHUB_TEST_COMMITS = ("list_commits", {"owner": "kotlickya", "repo": "argo-repo", "perPage": 1}, "sha")
@@ -43,6 +44,7 @@ class ServerCase:
     command: list = field(default_factory=list)  # replaces the image CMD
     entrypoint: str = ""  # script in tests/ run before the image's own CMD
     files: str = ""  # fixture whose directory is mounted read-only at /mcp-test
+    network: str = ""  # docker network to run on instead of the test network, e.g. kind
 
 
 SERVERS = [
@@ -81,6 +83,12 @@ SERVERS = [
     ServerCase("gcp/storage", "list_objects", {"bucket_name": "mcp-test-bucket"}, "mcp-test-marker.txt",
                path="/sse", transport="sse", mock="fake_gcs", command=["--port", "8000", "--stdio", "storage-mcp"],
                env={"STORAGE_EMULATOR_HOST": "http://fake-gcs:4443/storage/v1", "GOOGLE_CLOUD_PROJECT": GCP_PROJECT}),
+    ServerCase("kubernetes-mcp-server", "namespaces_list", {}, "kube-system", path="/mcp", files="kind_files",
+               network="kind", command=["--port", "8000", "--read-only"], env={"KUBECONFIG": "/mcp-test/kubeconfig"}),
+    # get is off the default verb allowlist, which only holds approval-gated mutations
+    ServerCase("kubernetes-remediation", "run_kubectl_command", {"args": ["get", "namespace", "kube-system"]},
+               "kube-system", path="/mcp", files="kind_files", network="kind",
+               env={"KUBECONFIG": "/mcp-test/kubeconfig", "KUBECTL_ALLOWED_COMMANDS": "get"}),
 ]
 
 
@@ -159,6 +167,22 @@ def fake_atlassian(network):
     subprocess.run(["docker", "rm", "-f", container], capture_output=True)
 
 
+@pytest.fixture(scope="session")
+def kind_files(tmp_path_factory):
+    """Kubeconfig for the kind cluster as seen from containers on the kind network."""
+    kubeconfig = subprocess.run(["kind", "get", "kubeconfig", "--internal", "--name", KIND_CLUSTER],
+                                capture_output=True, text=True)
+    if kubeconfig.returncode and os.environ.get("CI"):
+        pytest.fail(f"kind cluster {KIND_CLUSTER} not found: {kubeconfig.stderr}")
+    if kubeconfig.returncode:
+        pytest.skip(f"kind cluster {KIND_CLUSTER} not found, create it with: kind create cluster --name {KIND_CLUSTER}")
+    files = tmp_path_factory.mktemp("kind")
+    (files / "kubeconfig").write_text(kubeconfig.stdout)
+    files.chmod(0o755)
+    (files / "kubeconfig").chmod(0o644)
+    return files
+
+
 @pytest.fixture
 def fake_gcp(network, gcp_files):
     container = run_fake(network, "fake_gcp", "--network-alias", "logging.fake.test", "--network-alias",
@@ -231,7 +255,7 @@ def server(request, network):
         entrypoint_flags = ["-v", f"{TESTS_DIR}:/tests:ro", "--entrypoint", f"/tests/{case.entrypoint}"]
     if case.files:
         entrypoint_flags += ["-v", f"{request.getfixturevalue(case.files)}:/mcp-test:ro"]
-    container = docker_run("--network", network, "-p", f"{port}:8000", *env_flags, *entrypoint_flags,
+    container = docker_run("--network", case.network or network, "-p", f"{port}:8000", *env_flags, *entrypoint_flags,
                            image, *command, env=os.environ | container_env)
     yield case, f"http://localhost:{port}{case.path}"
     if request.node.rep_call.failed:
