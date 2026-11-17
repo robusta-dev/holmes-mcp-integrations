@@ -58,6 +58,11 @@ SERVERS = [
                mock="topaz", entrypoint="azure_topaz_entrypoint.sh"),
     ServerCase("prefect", "get_flows", {}, "mcp-test-flow", path="/sse", transport="sse", mock="prefect_server",
                env={"PREFECT_API_URL": "http://prefect-server:4200/api"}),
+    # TODO: use a gitlab.com read_api token (MCP_TEST_GITLAB_PAT) instead of fake_gitlab.py
+    ServerCase("gitlab", "get_project", {"project_id": "42"}, "mcp-test/mcp-test-project", path="/sse",
+               transport="sse", mock="fake_gitlab", env={"GITLAB_API_URL": "http://fake-gitlab:8080/api/v4",
+                                                         "GITLAB_PERSONAL_ACCESS_TOKEN": "fake",
+                                                         "GITLAB_READ_ONLY_MODE": "true"}),
 ]
 
 
@@ -90,11 +95,22 @@ def network():
     subprocess.run(["docker", "network", "rm", name], capture_output=True)
 
 
+def run_fake(network, script):
+    alias = script.replace("_", "-")
+    return docker_run("--network", network, "--network-alias", alias, "-v", f"{TESTS_DIR / script}.py:/{script}.py:ro",
+                      MOCK_PYTHON_IMAGE, "python3", f"/{script}.py")
+
+
 @pytest.fixture
 def fake_sentry(network):
-    container = docker_run("--network", network, "--network-alias", "fake-sentry",
-                           "-v", f"{TESTS_DIR / 'fake_sentry.py'}:/fake_sentry.py:ro",
-                           MOCK_PYTHON_IMAGE, "python3", "/fake_sentry.py")
+    container = run_fake(network, "fake_sentry")
+    yield container
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
+@pytest.fixture
+def fake_gitlab(network):
+    container = run_fake(network, "fake_gitlab")
     yield container
     subprocess.run(["docker", "rm", "-f", container], capture_output=True)
 
