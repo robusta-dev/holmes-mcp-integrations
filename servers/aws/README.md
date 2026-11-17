@@ -1,5 +1,7 @@
 # AWS MCP Server IAM setup for Holmes
 
+> The legacy `aws-api-mcp-server` and `multi-aws-api-mcp-server` images are no longer supported, see [SUNSET.md](SUNSET.md).
+
 Holmes talks directly to the hosted [AWS MCP Server](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/mcp-server.html) (`https://aws-mcp.<region>.api.aws/mcp`) and signs every request with its own AWS credentials, so no image is needed for new installs. This directory keeps the IAM helper scripts referenced from the [Holmes AWS docs](https://holmesgpt.dev/data-sources/builtin-toolsets/aws/), plus the legacy `aws-api-mcp-server` image (and `../aws-multi-account`) for existing installs of the deprecated `awslabs.aws-api-mcp-server`; pass `--service-account aws-api-mcp-sa` to `setup-irsa.sh` when targeting the legacy pod.
 
 ## Architecture
