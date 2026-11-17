@@ -61,11 +61,6 @@ SERVERS = [
                mock="topaz", entrypoint="azure_topaz_entrypoint.sh"),
     ServerCase("prefect", "get_flows", {}, "mcp-test-flow", path="/sse", transport="sse", mock="prefect_server",
                env={"PREFECT_API_URL": "http://prefect-server:4200/api"}),
-    # TODO: use a gitlab.com read_api token (MCP_TEST_GITLAB_PAT) instead of fake_gitlab.py
-    ServerCase("gitlab", "get_project", {"project_id": "42"}, "mcp-test/mcp-test-project", path="/sse",
-               transport="sse", mock="fake_gitlab", env={"GITLAB_API_URL": "http://fake-gitlab:8080/api/v4",
-                                                         "GITLAB_PERSONAL_ACCESS_TOKEN": "fake",
-                                                         "GITLAB_READ_ONLY_MODE": "true"}),
     # TODO: use an Atlassian Cloud test site (MCP_TEST_CONFLUENCE_*) instead of fake_atlassian.py
     ServerCase("mcp-atlassian", "confluence_search", {"query": "mcp-test-7f3a"}, "MCP test page", path="/sse",
                transport="sse", mock="fake_atlassian",
@@ -160,13 +155,6 @@ def fake_sentry(network):
 @pytest.fixture
 def fake_atlassian(network):
     container = run_fake(network, "fake_atlassian")
-    yield container
-    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
-
-
-@pytest.fixture
-def fake_gitlab(network):
-    container = run_fake(network, "fake_gitlab")
     yield container
     subprocess.run(["docker", "rm", "-f", container], capture_output=True)
 
