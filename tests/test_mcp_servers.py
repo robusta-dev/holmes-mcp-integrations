@@ -258,7 +258,7 @@ def server(request, network):
         entrypoint_flags += ["-v", f"{request.getfixturevalue(case.files)}:/mcp-test:ro"]
     container = docker_run("--network", case.network or network, "-p", f"{port}:8000", *env_flags, *entrypoint_flags,
                            image, *command, env=os.environ | container_env)
-    yield case, f"http://localhost:{port}{case.path}"
+    yield case, f"http://127.0.0.1:{port}{case.path}"
     if request.node.rep_call.failed:
         subprocess.run(["docker", "logs", "--tail", "50", container])
     subprocess.run(["docker", "rm", "-f", container], capture_output=True)
