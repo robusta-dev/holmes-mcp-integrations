@@ -26,7 +26,7 @@ FAKE_GCS_IMAGE = "fsouza/fake-gcs-server:1.52.2"
 GCP_PROJECT = "mcp-test-project"
 KIND_CLUSTER = os.environ.get("KIND_CLUSTER", "mcp-test")
 PREFECT_SEED_FLOW = ("import urllib.request; urllib.request.urlopen(urllib.request.Request("
-                     "'http://localhost:4200/api/flows/', b'{\"name\": \"mcp-test-flow\"}', {'Content-Type': 'application/json'}))")
+                     "'http://localhost:4200/api/flows/', b'{\"name\": \"mcp-test-flow\"}', {'Content-Type': 'application/json'}), timeout=5)")
 GITHUB_TEST_COMMITS = ("list_commits", {"owner": "kotlickya", "repo": "argo-repo", "perPage": 1}, "sha")
 
 
@@ -72,7 +72,8 @@ SERVERS = [
                     "READ_ONLY_MODE": "true", "ALLOW_GLOBAL_CRED_FALLBACK": "true",
                     "ENABLED_TOOLS": "confluence_search,confluence_get_page"}),
     # TODO: use a Viewer-only service account key on a GCP test project instead of fake_gcp.py and fake-gcs-server
-    ServerCase("gcp/gcloud", "run_gcloud_command", {"args": ["projects", "describe", GCP_PROJECT]}, GCP_PROJECT,
+    ServerCase("gcp/gcloud", "run_gcloud_command", {"args": ["projects", "describe", GCP_PROJECT]},
+               f"projectId: {GCP_PROJECT}",
                path="/sse", transport="sse", mock="fake_gcp", files="gcp_files",
                env={"CLOUDSDK_AUTH_ACCESS_TOKEN_FILE": "/mcp-test/token",
                     "CLOUDSDK_API_ENDPOINT_OVERRIDES_CLOUDRESOURCEMANAGER": "http://fake-gcp:8080/"}),
@@ -222,13 +223,16 @@ def topaz(network):
 def prefect_server(network):
     container = docker_run("--network", network, "--network-alias", "prefect-server", PREFECT_IMAGE,
                            "prefect", "server", "start", "--host", "0.0.0.0")
-    deadline = time.time() + 120
-    while subprocess.run(["docker", "exec", container, "python", "-c", PREFECT_SEED_FLOW], capture_output=True).returncode:
-        if time.time() > deadline:
-            pytest.fail("Prefect server not ready after 120s")
-        time.sleep(2)
-    yield container
-    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+    try:
+        deadline = time.time() + 120
+        while subprocess.run(["docker", "exec", container, "python", "-c", PREFECT_SEED_FLOW],
+                             capture_output=True, timeout=30).returncode:
+            if time.time() > deadline:
+                pytest.fail("Prefect server not ready after 120s")
+            time.sleep(2)
+        yield container
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
 
 
 @pytest.fixture(params=SERVERS, ids=lambda case: case.name)

@@ -12,8 +12,8 @@ Use the hosted [AWS MCP Server](https://docs.aws.amazon.com/agent-toolkit/latest
    helm get values RELEASE -n NAMESPACE > values.yaml
    ```
 
-2. Point the IAM role's trust policy at the **Holmes service account** (`system:serviceaccount:NAMESPACE:<release>-holmes-service-account`, or `robusta-holmes-service-account` for the Robusta chart) instead of `aws-api-mcp-sa`. `setup-irsa.sh` and `../aws-multi-account/scripts/setup-multi-account-iam.sh` create this trust for you.
-3. Set `mcpAddons.aws.hosted.enabled: true` in `values.yaml`, and for a single account add the role to Holmes' service account (`serviceAccount.annotations: eks.amazonaws.com/role-arn`). Multi-account `profiles` keep working unchanged.
+2. Point the IAM role's trust policy at the **Holmes service account** (`system:serviceaccount:NAMESPACE:<release>-holmes-service-account`, or `robusta-holmes-service-account` for the Robusta chart) instead of `aws-api-mcp-sa`. `setup-irsa.sh` creates this trust when you pass `--namespace NAMESPACE --service-account <that name>`, and `../aws-multi-account/scripts/setup-multi-account-iam.sh` does when each cluster's `namespace` and `service_account` in its config name the Holmes service account.
+3. Set `mcpAddons.aws.hosted.enabled: true` in `values.yaml`, and for a single account add the role to Holmes' service account (`serviceAccount.annotations: eks.amazonaws.com/role-arn`). Multi-account `profiles` keep working unchanged. For the Robusta chart, nest these values under `holmes:`.
 4. Upgrade:
 
    ```bash
