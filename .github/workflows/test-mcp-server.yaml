@@ -1,0 +1,49 @@
+name: Test one MCP server
+
+# Job template called by test-mcp-servers.yaml: builds the server's image and calls a read-only tool on it
+on:
+  workflow_call:
+    inputs:
+      server:
+        description: pytest -k expression selecting the server's cases
+        required: true
+        type: string
+      build-base:
+        description: Build this PR's supergateway_base locally, for Dockerfiles that pin it by registry tag
+        type: boolean
+        default: false
+      kind:
+        description: Create the kind cluster the kubernetes servers run against
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Build base image
+        if: inputs.build-base
+        run: |
+          version=$(grep '^version:' mcp_base_image/auto-build-config.yaml | cut -d'"' -f2)
+          docker build -t us-central1-docker.pkg.dev/genuine-flight-317411/mcp/supergateway_base:$version mcp_base_image
+
+      # The tests read its kubeconfig with kind get kubeconfig
+      - name: Create kind cluster
+        if: inputs.kind
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: mcp-test
+
+      - name: Docker tests
+        run: pytest tests -k "${{ inputs.server }}" -v

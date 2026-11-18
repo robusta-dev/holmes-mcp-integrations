@@ -1,5 +1,7 @@
 # AWS MCP Server Integration for Holmes
 
+> This image is no longer supported, see [SUNSET.md](../aws/SUNSET.md).
+
 This directory contains resources for deploying the AWS API MCP (Model Context Protocol) server for Holmes, enabling comprehensive AWS service queries including CloudWatch Container Insights for investigating Kubernetes issues.
 
 ## Overview
