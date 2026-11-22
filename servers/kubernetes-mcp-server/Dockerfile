@@ -1,7 +1,7 @@
 # Patches CVEs in robusta-dev/kubernetes-mcp-server v0.0.61-oauth:
 #   - rebuilds the binary with a patched Go and bumped Go modules
 #   - runs on ubi-micro, which drops the UBI minimal packages with unfixed CVEs (krb5, sqlite, json-glib)
-FROM golang:1.26.10-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -12,7 +12,10 @@ RUN git clone --branch v0.0.61-oauth https://github.com/robusta-dev/kubernetes-m
 
 WORKDIR /src
 
-RUN go get github.com/containerd/containerd@v1.7.33 \
+RUN go get github.com/containerd/containerd@v1.7.36 \
+      github.com/google/cel-go@v0.29.0 \
+      go.opentelemetry.io/otel/sdk@v1.47.0 \
+      knative.dev/pkg@v0.0.0-20260531000007-52dbd5ece63f \
       github.com/go-jose/go-jose/v4@v4.1.6 \
       github.com/klauspost/compress@v1.18.7 \
       golang.org/x/crypto@v0.58.0 \
