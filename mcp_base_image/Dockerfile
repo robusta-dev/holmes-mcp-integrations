@@ -38,14 +38,18 @@ RUN NODE_VERSION=20.20.2 && \
 # TODO: move this image to a supported Node LTS (Node 20 went EOL 2026-04-30),
 # then drop the ^11 pin.
 # Patched here:
-# - minimatch, tar: general updates
+# - minimatch 10 → 11 (CVE-2026-118764) and glob 13 → 14 (CVE-2026-118773),
+#   installed with their new deps (path-scurry 3, @isaacs/nonrecursive-glob-match)
+# - tar: general update
 # - picomatch (CVE-2026-33671)
 # - brace-expansion (CVE-2026-33750)
 RUN npm install -g npm@^11 && \
+    mkdir /tmp/npm-deps && cd /tmp/npm-deps && \
+    npm install --no-package-lock minimatch@^11.0.1 glob@^14.0.2 && \
+    cd /usr/local/lib/node_modules/npm/node_modules && rm -rf minimatch glob path-scurry && \
+    cp -r /tmp/npm-deps/node_modules/. . && rm -rf /tmp/npm-deps && \
     cd /tmp && \
-    npm pack minimatch@^10.2.6 && npm pack tar@latest && npm pack picomatch@latest && npm pack brace-expansion@latest && \
-    cd /usr/local/lib/node_modules/npm/node_modules/minimatch && \
-    tar xzf /tmp/minimatch-*.tgz --strip-components=1 && \
+    npm pack tar@latest && npm pack picomatch@latest && npm pack brace-expansion@latest && \
     cd /usr/local/lib/node_modules/npm/node_modules/tar && \
     tar xzf /tmp/tar-*.tgz --strip-components=1 && \
     cd /usr/local/lib/node_modules/npm/node_modules/tinyglobby/node_modules/picomatch && \

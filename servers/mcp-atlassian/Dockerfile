@@ -28,6 +28,9 @@ RUN uv pip install --python /app/.venv/bin/python --upgrade \
       "pymdown-extensions>=11.0.1" \
       "soupsieve>=4.0.0" \
       "urllib3>=2.8.0" \
+      "opentelemetry-api>=1.45.2" \
+      "python-dotenv>=1.2.2" \
+      "pydantic-settings>=2.14.2" \
     && uv pip check --python /app/.venv/bin/python \
     && rm -f /usr/local/bin/uv
 
